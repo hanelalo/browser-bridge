@@ -1,0 +1,21 @@
+{
+  "name": "browser-bridge-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip"
+  },
+  "packageManager": "pnpm@10.33.2+sha1.0d3e2b51a2bdbb7895ddb8085a0c46db642752d7",
+  "devDependencies": {
+    "@types/chrome": "^0.2.5",
+    "@wxt-dev/module-vue": "^1.0.3",
+    "typescript": "^7.0.2",
+    "wxt": "^0.21.3"
+  },
+  "dependencies": {
+    "vue": "^3.5.40"
+  }
+}

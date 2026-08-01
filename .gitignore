@@ -1,0 +1,13 @@
+# Rust
+target/
+
+# Node / WXT
+node_modules/
+.wxt/
+.output/
+dist/
+
+# misc
+.DS_Store
+*.log
+.env
