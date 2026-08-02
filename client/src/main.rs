@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use bridge_core::recipes::googlesearch::googlesearch;
+use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
 
@@ -65,6 +66,14 @@ enum Cmd {
     },
     /// 搜索 Google 并返回结构化结果（JSON 数组：title / description / url）
     Googlesearch {
+        /// 搜索关键词
+        query: String,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
+    /// 搜索 Reddit 并返回结构化结果（JSON 数组：title / description / url）
+    Redditsearch {
         /// 搜索关键词
         query: String,
         /// 指定标签页 id（默认当前激活标签页）
@@ -256,6 +265,23 @@ async fn main() {
                 }
             };
             match googlesearch(&mut bridge, &query, tab).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::Redditsearch { query, tab } => {
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match redditsearch(&mut bridge, &query, tab).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");

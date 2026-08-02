@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bridge_core::recipes::googlesearch::googlesearch;
+use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
 use rmcp::handler::server::wrapper::Parameters;
@@ -190,6 +191,13 @@ struct NewTabParams {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct GooglesearchParams {
+    query: String,
+    #[serde(default)]
+    tab_id: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct RedditsearchParams {
     query: String,
     #[serde(default)]
     tab_id: Option<i32>,
@@ -457,6 +465,19 @@ impl BridgeMcp {
         let p = params.0;
         let mut bridge = self.bridge.lock().await;
         let out = googlesearch(&mut bridge, &p.query, p.tab_id)
+            .await
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "redditsearch", description = "Reddit 搜索，返回 { tab_id, results[] }（title/description/url/target）")]
+    pub async fn redditsearch_tool(
+        &self,
+        params: Parameters<RedditsearchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = redditsearch(&mut bridge, &p.query, p.tab_id)
             .await
             .map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)

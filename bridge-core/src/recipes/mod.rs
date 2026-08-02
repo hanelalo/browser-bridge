@@ -2,3 +2,4 @@
 //! 只依赖通用协议指令（navigate / scrape / click 等），扩展与协议保持通用。
 
 pub mod googlesearch;
+pub mod redditsearch;

@@ -240,7 +240,9 @@ let userScriptSetup: Promise<void> | null = null;
 /** 确保 USER_SCRIPT 世界已配置 unsafe-eval 且监听器已注册。 */
 async function ensureEvalUserScript(): Promise<void> {
   if (!chrome.userScripts?.register) {
-    throw new Error('chrome.userScripts 不可用（需要 Chrome 120+）');
+    throw new Error(
+      'chrome.userScripts 不可用：Chrome 138+ 需要在扩展详情页开启「允许用户脚本」开关',
+    );
   }
   if (!userScriptSetup) {
     userScriptSetup = (async () => {
@@ -312,7 +314,8 @@ async function runScript(params: Record<string, unknown>): Promise<unknown> {
           return String(v);
         };
         try {
-          const fn = new Function('"use strict"; return (' + ${JSON.stringify(code)} + ');');
+          const __code = ${JSON.stringify(code)};
+          const fn = new Function('"use strict"; return (' + __code + ');');
           const value = await fn();
           return { __ok: true, value: __serialize(value) };
         } catch (err) {

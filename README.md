@@ -44,6 +44,7 @@ cargo run -- click '#submit'
 cargo run -- set_value '#username' alice
 cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 cargo run -- googlesearch 'Haze Seas'
+cargo run -- redditsearch 'rust programming'
 ```
 
 ### 指令速查表
@@ -68,6 +69,7 @@ cargo run -- googlesearch 'Haze Seas'
 | `run-script '<js>'` | 页面里执行任意 JS，返回 JSON |
 | `get-page-content` | 读取页面标题/URL/文本 |
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
+| `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 
 多数指令支持 `--tab <id>` 指定标签页，默认操作当前激活页。
 
@@ -81,6 +83,16 @@ cargo run -- googlesearch 'Haze Seas'
 
 `target` 是可直接喂给 `click` 的元素定位（`{ by, value, index }`），方便后续点击某个结果。实现是 client 侧的"站点配方"：用通用原语 `navigate` + `scrape` 编排，选择器作为常量集中在 client 里（`#rso > div` 容器、`data-sncf='1'` 描述等），扩展与协议保持通用。
 
+### redditsearch
+
+Reddit 搜索专用快捷指令，返回结构与 `googlesearch` 一致（`{ tab_id, results[] }`，每项 `title` / `description` / `url` / `target`）：
+
+```sh
+cargo run -- redditsearch 'rust programming'
+```
+
+结果页有两种渲染形态：`search-post-with-content-preview`（带正文预览）与 `search-sdui-post`（只有标题），配方同时收取；描述取自帖子正文预览，`search-sdui-post` 形态没有预览时为 `null`。Reddit 首页的搜索框藏在两层 shadow DOM 里，通用定位指令够不到，但配方直接导航到 `/search/?q=`，不依赖首页交互。
+
 ### client 结构
 
 ```text
@@ -88,7 +100,8 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
 ├── transport.rs          # 连接 / 自动拉起 server / 请求 / 可重连 Bridge
 ├── target.rs             # 元素定位参数（css / text / xpath）
 └── recipes/              # 站点配方
-    └── googlesearch.rs   # Google 搜索（选择器 + 编排）
+    ├── googlesearch.rs   # Google 搜索（选择器 + 编排）
+    └── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
@@ -105,7 +118,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
-- 工具列表：`list_tabs` / `close_tab` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch`。
+- 工具列表：`list_tabs` / `close_tab` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch`。
 
 #### 配置示例
 
