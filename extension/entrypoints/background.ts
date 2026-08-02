@@ -10,17 +10,19 @@ let pingTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectDelayMs = 500;
 let status: 'connecting' | 'connected' | 'disconnected' = 'disconnected';
 
-// bridge 自动打开的标签页（new_tab），用于 close_auto_tabs 一键清理。
+// bridge 自动打开的标签页（new_tab / click --new-tab），tabId -> 创建者 client_id（'' 表示未知/手动场景）。
+// close_auto_tabs 支持按 owner 隔离：多 agent 场景下各自只能清理自己创建的标签页。
 // 存 chrome.storage.session，service worker 重启也不丢；浏览器重启后自然失效。
-let autoTabs: Set<number> = new Set();
+let autoTabs: Map<number, string> = new Map();
 
 // click 请求 new_tab 时的捕获窗口：预登记源标签页，onCreated 按 openerTabId 精确关联
 let newTabClickUntil = 0;
 let newTabClickSourceTab: number | null = null;
+let newTabClickOwner = '';
 
 async function saveAutoTabs(): Promise<void> {
   try {
-    await chrome.storage.session.set({ autoTabs: Array.from(autoTabs) });
+    await chrome.storage.session.set({ autoTabs: Array.from(autoTabs.entries()) });
   } catch {
     // session 存储不可用时退回仅内存记录
   }
@@ -29,7 +31,11 @@ async function saveAutoTabs(): Promise<void> {
 void (async () => {
   try {
     const got = await chrome.storage.session.get('autoTabs');
-    if (Array.isArray(got.autoTabs)) autoTabs = new Set(got.autoTabs as number[]);
+    if (Array.isArray(got.autoTabs)) {
+      autoTabs = new Map(
+        (got.autoTabs as Array<[number, string]>).map(([id, owner]) => [Number(id), String(owner ?? '')]),
+      );
+    }
   } catch {
     // ignore
   }
@@ -40,7 +46,7 @@ void (async () => {
       tab.openerTabId === newTabClickSourceTab &&
       tab.id != null
     ) {
-      autoTabs.add(tab.id);
+      autoTabs.set(tab.id, newTabClickOwner);
       void saveAutoTabs();
     }
   });
@@ -116,7 +122,12 @@ function send(socket: WebSocket, msg: unknown): void {
 }
 
 async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
-  let msg: { id?: unknown; method?: unknown; params?: Record<string, unknown> };
+  let msg: {
+    id?: unknown;
+    method?: unknown;
+    params?: Record<string, unknown>;
+    client_id?: unknown;
+  };
   try {
     msg = JSON.parse(raw);
   } catch {
@@ -132,7 +143,8 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
   }
 
   try {
-    const result = await execute(msg.method, msg.params ?? {});
+    const clientId = typeof msg.client_id === 'string' ? msg.client_id : '';
+    const result = await execute(msg.method, msg.params ?? {}, clientId);
     send(socket, { id: msg.id, success: true, result });
   } catch (err) {
     send(socket, {
@@ -143,22 +155,26 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
   }
 }
 
-async function execute(method: string, params: Record<string, unknown>): Promise<unknown> {
+async function execute(
+  method: string,
+  params: Record<string, unknown>,
+  clientId: string,
+): Promise<unknown> {
   switch (method) {
     case 'list_tabs':
       return listTabs();
     case 'close_tab':
       return closeTab(params);
     case 'new_tab':
-      return newTab(params);
+      return newTab(params, clientId);
     case 'activate_tab':
       return activateTab(params);
     case 'close_auto_tabs':
-      return closeAutoTabs();
+      return closeAutoTabs(params);
     case 'navigate':
       return navigate(params);
     case 'click':
-      return runPageOp('click', normalizeTarget(params));
+      return runPageOp('click', normalizeTarget(params), clientId);
     case 'press_key':
       return pressKey(params);
     case 'run_script':
@@ -171,7 +187,7 @@ async function execute(method: string, params: Record<string, unknown>): Promise
     case 'clear':
     case 'get_value':
     case 'scrape':
-      return runPageOp(method, params);
+      return runPageOp(method, params, clientId);
     case 'get_page_content':
       return getPageContent(params);
     default:
@@ -188,13 +204,18 @@ function normalizeTarget(params: Record<string, unknown>): Record<string, unknow
 }
 
 /** 在指定标签页里跑页面级操作（统一入口）。 */
-async function runPageOp(op: string, params: Record<string, unknown>): Promise<unknown> {
+async function runPageOp(
+  op: string,
+  params: Record<string, unknown>,
+  clientId: string,
+): Promise<unknown> {
   const tab = await resolveTab(params.tab_id as number | undefined);
   if (tab.id == null) throw new Error('tab has no id');
   // 预登记：本次点击要求新开标签页时，开 3 秒窗口等 onCreated 按 openerTabId 捕获
   if ((op === 'click' || op === 'click_at') && params.new_tab === true) {
     newTabClickUntil = Date.now() + 3000;
     newTabClickSourceTab = tab.id;
+    newTabClickOwner = clientId;
   }
   try {
     const [result] = await chrome.scripting.executeScript({
@@ -208,7 +229,7 @@ async function runPageOp(op: string, params: Record<string, unknown>): Promise<u
     if (typeof r.open_url === 'string' && r.open_url) {
       const nt = await chrome.tabs.create({ url: r.open_url });
       if (nt.id != null) {
-        autoTabs.add(nt.id);
+        autoTabs.set(nt.id, clientId);
         void saveAutoTabs();
       }
       const { open_url: _openUrl, ...rest } = r;
@@ -490,9 +511,11 @@ async function closeTab(params: Record<string, unknown>): Promise<unknown> {
   return { closed: true, tab_id: tab.id };
 }
 
-/** 关闭 bridge 自动打开（new_tab）的全部标签页，不碰手动开的。 */
-async function closeAutoTabs(): Promise<unknown> {
-  const ids = Array.from(autoTabs);
+/** 关闭 bridge 自动打开的标签页；params.owner 指定时只关该创建者的（多 agent 隔离）。 */
+async function closeAutoTabs(params: Record<string, unknown>): Promise<unknown> {
+  const owner = typeof params?.owner === 'string' && params.owner ? params.owner : null;
+  const entries = Array.from(autoTabs.entries()).filter(([, o]) => owner === null || o === owner);
+  const ids = entries.map(([id]) => id);
   const existing = (
     await Promise.all(ids.map((id) => chrome.tabs.get(id).catch(() => null)))
   ).filter((t): t is chrome.tabs.Tab => t !== null);
@@ -500,17 +523,19 @@ async function closeAutoTabs(): Promise<unknown> {
   if (closed.length > 0) {
     await chrome.tabs.remove(closed);
   }
-  autoTabs.clear();
+  entries.forEach(([id]) => {
+    autoTabs.delete(id);
+  });
   void saveAutoTabs();
   return { closed };
 }
 
 /** 新建标签页（可指定 URL）。 */
-async function newTab(params: Record<string, unknown>): Promise<unknown> {
+async function newTab(params: Record<string, unknown>, clientId: string): Promise<unknown> {
   const url = typeof params.url === 'string' && params.url ? params.url : undefined;
   const tab = await chrome.tabs.create({ url });
   if (tab.id != null) {
-    autoTabs.add(tab.id);
+    autoTabs.set(tab.id, clientId);
     void saveAutoTabs();
   }
   return { tab_id: tab.id, url: tab.url ?? null, title: tab.title ?? null, active: tab.active };

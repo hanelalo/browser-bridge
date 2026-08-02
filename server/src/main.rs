@@ -34,6 +34,9 @@ struct WireMessage {
     role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+    /// 来源客户端身份（server 转发 client 请求给 extension 时盖章）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,6 +74,7 @@ impl WireMessage {
             type_: None,
             role: None,
             name: None,
+            client_id: None,
             method: None,
             params: None,
             success: None,
@@ -102,6 +106,7 @@ enum HubMsg {
         conn_id: u64,
         role: Role,
         name: String,
+        client_id: Option<String>,
         tx: mpsc::UnboundedSender<Message>,
     },
     Unregister {
@@ -118,6 +123,7 @@ enum HubMsg {
 
 struct Conn {
     role: Role,
+    client_id: Option<String>,
     tx: mpsc::UnboundedSender<Message>,
 }
 
@@ -147,6 +153,7 @@ async fn hub_loop(
                         conn_id,
                         role,
                         name,
+                        client_id,
                         tx,
                     } => {
                         if role == Role::Extension {
@@ -160,7 +167,7 @@ async fn hub_loop(
                             "[hub] connection #{conn_id} registered as {:?} \"{name}\"",
                             role
                         );
-                        conns.insert(conn_id, Conn { role, tx });
+                        conns.insert(conn_id, Conn { role, client_id, tx });
                     }
                     HubMsg::Unregister { conn_id } => {
                         if extension_id == Some(conn_id) {
@@ -244,10 +251,13 @@ fn handle_client(
     let Some(ext_tx) = conns.get(&ext_id).map(|c| c.tx.clone()) else {
         return;
     };
-    if conns.get(&client_id).is_none() {
+    let Some(conn) = conns.get(&client_id) else {
         return;
-    }
+    };
 
+    // 盖章来源客户端身份，extension 据此记录标签页归属（close_auto_tabs 按 owner 隔离）
+    let mut msg = msg;
+    msg.client_id = conn.client_id.clone();
     let _ = ext_tx.send(msg.to_text());
     let (done_tx, done_rx) = oneshot::channel();
     pending.insert(id.clone(), (client_id, done_tx));
@@ -348,10 +358,12 @@ async fn handle_conn(
         }
     };
     let name = hello.name.clone().unwrap_or_else(|| "unnamed".to_string());
+    let client_id = hello.client_id.clone();
     let _ = hub_tx.send(HubMsg::Register {
         conn_id,
         role,
         name,
+        client_id,
         tx: out_tx,
     });
 

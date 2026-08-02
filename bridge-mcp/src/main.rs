@@ -22,6 +22,7 @@ const DEFAULT_SERVER: &str = "ws://127.0.0.1:9225";
 #[derive(Clone)]
 struct BridgeMcp {
     bridge: Arc<Mutex<Bridge>>,
+    client_id: String,
 }
 
 // ---------- 参数结构 ----------
@@ -268,9 +269,15 @@ impl BridgeMcp {
         call(&self.bridge, "ct", "close_tab", json!({ "tab_id": params.0.tab_id })).await
     }
 
-    #[tool(name = "close_auto_tabs", description = "关闭 bridge 自动打开的全部标签页（不碰手动开的）")]
+    #[tool(name = "close_auto_tabs", description = "关闭本会话（当前 MCP 进程）自动打开的标签页，不影响其他会话")]
     pub async fn close_auto_tabs(&self) -> Result<CallToolResult, ErrorData> {
-        call(&self.bridge, "cat", "close_auto_tabs", json!({})).await
+        call(
+            &self.bridge,
+            "cat",
+            "close_auto_tabs",
+            json!({ "owner": self.client_id }),
+        )
+        .await
     }
 
     #[tool(name = "new_tab", description = "新建标签页（可选打开 URL）")]
@@ -528,10 +535,20 @@ impl BridgeMcp {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = std::env::var("BRIDGE_SERVER").unwrap_or_else(|_| DEFAULT_SERVER.to_string());
-    let bridge = Bridge::connect(&server).await?;
+    // 每个 MCP 进程一个稳定身份（多 agent 共享浏览器时用于标签页归属隔离）
+    let client_id = format!(
+        "mcp-{}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let bridge = Bridge::connect_with_client_id(&server, &client_id).await?;
     eprintln!("bridge-mcp connected to {server}");
     let mcp = BridgeMcp {
         bridge: Arc::new(Mutex::new(bridge)),
+        client_id,
     };
     let service = mcp.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;

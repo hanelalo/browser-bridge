@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -21,15 +22,27 @@ pub type BridgeStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// 可重连的 bridge 客户端：长连接 + 请求，断线自动重连（含自动拉起）后重试一次。
 pub struct Bridge {
     server: String,
+    client_id: String,
     ws: BridgeStream,
 }
 
 impl Bridge {
     pub async fn connect(server: &str) -> Result<Self, String> {
+        let client_id = std::env::var("BRIDGE_CLIENT_ID").unwrap_or_else(|_| "cli".to_string());
+        Self::connect_with_client_id(server, &client_id).await
+    }
+
+    /// 指定客户端身份（多 agent 场景下每个调用方用独立 id，用于标签页归属与清理隔离）
+    pub async fn connect_with_client_id(server: &str, client_id: &str) -> Result<Self, String> {
         Ok(Self {
             server: server.to_string(),
-            ws: connect_bridge(server).await?,
+            client_id: client_id.to_string(),
+            ws: connect_bridge(server, client_id).await?,
         })
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.client_id
     }
 
     /// 发送一次请求；连接断开时自动重连（含自动拉起 server）后重试一次。
@@ -39,20 +52,24 @@ impl Bridge {
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
-        match request(&mut self.ws, id, method, params.clone()).await {
+        // 请求 id 只是语义标签，线上用唯一 id（进程 id + 自增序号），
+        // 避免多 agent 并发时 server 按 id 路由响应串线
+        static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
+        let wire_id = format!("{id}-{}-{}", std::process::id(), REQ_SEQ.fetch_add(1, Ordering::Relaxed));
+        match request(&mut self.ws, &wire_id, method, params.clone()).await {
             Ok(value) => Ok(value),
             Err(_) => {
-                self.ws = connect_bridge(&self.server).await?;
-                request(&mut self.ws, id, method, params).await
+                self.ws = connect_bridge(&self.server, &self.client_id).await?;
+                request(&mut self.ws, &wire_id, method, params).await
             }
         }
     }
 }
 
 /// 连接 server 并完成 hello 握手；连接失败时自动拉起 bridge-server。
-pub async fn connect_bridge(server: &str) -> Result<BridgeStream, String> {
+pub async fn connect_bridge(server: &str, client_id: &str) -> Result<BridgeStream, String> {
     match connect_async(server).await {
-        Ok((ws, _)) => finish_hello(ws).await,
+        Ok((ws, _)) => finish_hello(ws, client_id).await,
         Err(first_err) => {
             // server 未运行：自动拉起一个，并等它就绪
             match spawn_bridge_server(server) {
@@ -63,7 +80,7 @@ pub async fn connect_bridge(server: &str) -> Result<BridgeStream, String> {
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                     loop {
                         match connect_async(server).await {
-                            Ok((ws, _)) => return finish_hello(ws).await,
+                            Ok((ws, _)) => return finish_hello(ws, client_id).await,
                             Err(e) => {
                                 if tokio::time::Instant::now() >= deadline {
                                     return Err(format!(
@@ -84,9 +101,14 @@ pub async fn connect_bridge(server: &str) -> Result<BridgeStream, String> {
 }
 
 /// 完成 hello 握手。
-async fn finish_hello(mut ws: BridgeStream) -> Result<BridgeStream, String> {
+async fn finish_hello(mut ws: BridgeStream, client_id: &str) -> Result<BridgeStream, String> {
     ws.send(Message::Text(
-        json!({ "type": "hello", "role": "client", "name": "bridge-client" })
+        json!({
+            "type": "hello",
+            "role": "client",
+            "name": "bridge-client",
+            "client_id": client_id,
+        })
             .to_string()
             .into(),
     ))

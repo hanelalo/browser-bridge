@@ -100,7 +100,17 @@ result：
 
 ### close_auto_tabs
 
-关闭 bridge 自动打开（`new_tab` 创建）的全部标签页，不碰手动开的标签页。无参数。
+关闭 bridge 自动打开（`new_tab` / `click --new-tab` 创建）的标签页，不碰手动开的标签页。
+
+params：
+
+```json
+{ "owner": "mcp-1234-abcd" }
+```
+
+`owner` 可选：指定时只关闭该创建者的标签页（server 会为每个连接盖章 `client_id`，多 agent 场景各自隔离）；省略时关闭全部（CLI 手动清理入口）。
+
+`new_tab` / `click --new-tab` 创建的标签页会记录创建者身份（请求的 `client_id`，由 server 在转发时盖章）。
 
 result：
 
