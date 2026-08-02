@@ -113,20 +113,124 @@ claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bri
 
 ## 可用工具
 
-协议原语（通用，任何网站都能用）：
+工具分两类：**协议原语**（通用指令，任何网站都能用）与**站点配方**（搜索/查询专用快捷指令，返回结构化 JSON）。
 
-- 标签页：`list_tabs` / `new_tab` / `activate_tab` / `close_tab` / `close_auto_tabs`
-- 导航与读取：`navigate` / `get_page_content` / `scrape`（CSS 字段映射，CSP 安全）/ `run_script`（任意 JS）
-- 交互：`click`（支持 css/text/xpath 三种定位，锚点默认同标签页打开）/ `click_at` / `press_key` / `scroll`
-- 表单：`set_value` / `check` / `select_option` / `clear` / `get_value`
+所有工具都通过 MCP 标准 JSON 传参，客户端按工具描述里的 schema 即可知道每个参数的类型、是否必填、默认值和可选值。下文中「必填」参数缺一不可；「可选」参数省略时使用默认值。
 
-站点配方（专用快捷指令，返回结构化 JSON）：
+### 公共参数约定
 
-- `googlesearch`：Google 搜索，每条结果含 title / description / url / target（target 可直接喂给 click）
-- `redditsearch`：Reddit 搜索，结构同上
-- `youtubesearch`：YouTube 搜索，每条结果含 title / channel / views / published / duration / url / target，支持上传日期（today/week/month/year）与优先顺序（relevance/popularity）筛选，max 控制最多返回条数（默认 5）；直接解析页面 HTML 里的 ytInitialData + InnerTube continuation 翻页（隐藏/被遮挡标签页照常拿满，不弹窗不抢焦点）
-- `googletrends`：Google Trends 单关键词，返回趋势序列 + 热门/上升查询（自动翻页）
-- `googletrends_compare`：多关键词走势对比（共享 0-100 刻度）
+| 参数 | 说明 |
+|------|------|
+| `tab_id` | 可选。指定操作哪个标签页；省略时操作当前激活页。配方返回的 `tab_id` 可直接用于后续链式操作（如把结果 `target` 喂给 `click`） |
+| `target` / `by` / `index` | 元素定位三元组：`by` 取值 `css`（默认）/ `text` / `xpath`，`target` 是对应定位值，`index` 从 0 开始选第几个匹配 |
+| `timeout` | 可选。等待元素出现或页面加载的最长毫秒数（如 `click` 默认 5000） |
+
+### 站点配方
+
+#### googlesearch
+
+Google 搜索。复用当前标签页导航到搜索结果页，**不新建标签页**。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `query` | string | ✔ | — | 搜索关键词 |
+| `tab_id` | int | — | 当前激活页 | 目标标签页 |
+
+返回：`{ "tab_id": int, "results": [ { "title", "description", "url", "target" } ] }`。每条的 `target` 可直接喂给 `click`。
+
+示例：
+
+```json
+{ "query": "Haze Seas" }
+```
+
+#### redditsearch
+
+Reddit 搜索。直接导航到 Reddit 的 `/search/?q=` 结果页，不依赖首页交互，复用当前标签页、**不新建标签页**。参数与返回结构同 `googlesearch`（`query` 必填，`tab_id` 可选）。
+
+返回：`{ "tab_id": int, "results": [ { "title", "description", "url", "target" } ] }`。结果页有两种渲染形态（带正文预览 / 仅标题），配方同时收取；无预览时 `description` 为 `null`。
+
+#### youtubesearch
+
+YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结果页 HTML 内嵌的 `ytInitialData`（首屏约 20 条），不足 `max` 条时用页面里的 InnerTube API key/context 通过 continuation 续取（与 yt-dlp 同源）。**不依赖页面渲染与窗口可见性**：标签页在后台或被全屏应用遮挡时也照常拿满，不弹窗、不抢焦点、不用手动切过去。`duration` 取自接口的 `lengthText`，不会缺失。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `query` | string | ✔ | — | 搜索关键词 |
+| `time` | string | — | `any` | 上传日期筛选：`any` / `today` / `week` / `month` / `year` |
+| `sort` | string | — | `relevance` | 优先顺序：`relevance`（相关程度）/ `popularity`（热门程度） |
+| `max` | int | — | `5` | 最多返回条数（至少 1；实测 `max=40` 约 3 秒返回） |
+| `tab_id` | int | — | 当前激活页 | 目标标签页 |
+
+返回：`{ "tab_id": int, "results": [ { "title", "channel", "views", "published", "duration", "url", "target" } ] }`。`published` / `duration` 为页面原始文本（如 `1 week ago` / `12:34`），按 URL 去重后截取前 `max` 条。
+
+示例：
+
+```json
+{ "query": "rust programming", "time": "week", "sort": "popularity", "max": 10 }
+```
+
+注意：
+
+- `time` / `sort` 传入不支持的值会**直接报错**（不静默忽略），错误信息会列出合法取值。
+- 若页面数据缺失（如遇到验证墙 / consent 页）会返回明确错误提示。
+
+#### googletrends
+
+单关键词 Google Trends 查询，自动翻页拿完整趋势序列 + 热门/上升查询。**每次查询会新建一个标签页**，流程收尾时请调用 `close_auto_tabs` 清理。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `query` | string | ✔ | — | 关键词 |
+| `date` | string | — | `today 1-m` | 时间范围：`today 1-m` / `today 3-m` / `today 12-m` / `today 5-y` / `all` |
+| `geo` | string | — | `Worldwide` | 地区代码（如 `US`、`CN`），不区分大小写 |
+
+返回：`{ "tab_id": int, "trend": [...], "top": [...], "rising": [...] }`。
+
+#### googletrends_compare
+
+多关键词走势对比，共享 0-100 刻度。同样会新建标签页，收尾时用 `close_auto_tabs` 清理。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `terms` | string[] | ✔ | — | 要对比的关键词列表（2 个及以上效果最好） |
+| `date` | string | — | `today 1-m` | 同 `googletrends` |
+| `geo` | string | — | `Worldwide` | 同 `googletrends` |
+
+返回：`{ "tab_id": int, "series": [...] }`。
+
+### 协议原语
+
+每个工具的参数同样通过 MCP schema 暴露，速查如下（`tab_id`、`target`/`by`/`index` 见上方公共约定，不重复列出）：
+
+| 工具 | 用途 | 主要参数 |
+|------|------|----------|
+| `list_tabs` | 列出所有标签页 | 无 |
+| `new_tab` | 新建标签页 | `url` |
+| `activate_tab` | 切换到指定标签页并聚焦窗口 | `tab_id` |
+| `close_tab` | 关闭标签页（默认当前激活页） | `tab_id` |
+| `close_auto_tabs` | 关闭本会话（当前 MCP 进程）自动打开的标签页（`new_tab` / `click --new-tab` / `googletrends` 创建的），不影响其他会话 | 无 |
+| `navigate` | 导航到指定 URL 并等待加载完成 | `url`（必填）、`tab_id` |
+| `get_page_content` | 读取页面标题 / URL / 文本 | `tab_id` |
+| `scrape` | 按 CSS 选择器提取结构化数据 | `item`（必填，结果容器选择器）、`fields`（字段映射：`字段名: "选择器[@属性]"`）、`title` / `link` / `desc`、`timeout`、`tab_id` |
+| `run_script` | 在页面执行任意 JS 表达式，返回 JSON 序列化结果 | `code`（必填）、`tab_id` |
+| `click` | 点击匹配定位的元素 | `target`（必填）、`by`、`index`、`timeout`（默认 5000ms）、`new_tab`（锚点在新标签页打开，默认 false）、`tab_id` |
+| `click_at` | 按页面坐标点击 | `x`、`y`（必填）、`tab_id` |
+| `press_key` | 模拟按键（Enter / Escape / a / F5 等，支持修饰键） | `key`（必填，KeyboardEvent.key 值）、`modifiers`、`target`/`by`/`index`、`wait_load`（按键后等待加载）、`tab_id` |
+| `scroll` | 滚动窗口或指定容器 | `dx`、`dy`、`target`/`by`/`index`、`smooth`、`tab_id` |
+| `set_value` | 设置 input / textarea / contenteditable 的值 | `target`（必填）、`value`（必填）、`by`、`index`、`tab_id` |
+| `check` | 勾选 / 取消 checkbox 或 radio | `target`（必填）、`checked`（默认 true）、`by`、`index`、`tab_id` |
+| `select_option` | 选中 `<select>` 的某个选项 | `target`（必填）、`option_value` / `option_text` / `option_index`（三选一）、`by`、`index`、`tab_id` |
+| `clear` | 清空 input / textarea / contenteditable | `target`（必填）、`by`、`index`、`tab_id` |
+| `get_value` | 读取元素当前值（用于验证） | `target`（必填）、`by`、`index`、`tab_id` |
 
 ## 多 agent / 多客户端使用
 
