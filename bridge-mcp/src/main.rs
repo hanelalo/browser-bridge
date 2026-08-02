@@ -12,6 +12,7 @@ use bridge_core::target;
 use bridge_core::transport::Bridge;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData};
+use rmcp::tool_handler;
 use rmcp::{ServiceExt, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -267,7 +268,7 @@ fn with_target(
 
 // ---------- MCP tools ----------
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl BridgeMcp {
     #[tool(name = "list_tabs", description = "列出所有标签页")]
     pub async fn list_tabs(&self) -> Result<CallToolResult, ErrorData> {
@@ -560,6 +561,25 @@ impl BridgeMcp {
         .await
         .map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
+    }
+}
+
+#[tool_handler(router = Self::tool_router())]
+impl rmcp::ServerHandler for BridgeMcp {
+    /// opencode 1.18.x 的 MCP 客户端对 2026-07-28 协议（server/discover + resultType
+    /// 包装）与 rmcp 3.1.0 的实现不兼容：探测成功后跳过 initialize 直接发 tools/list，
+    /// 响应解析失败导致 "Failed to get tools"。
+    /// 这里只声明到 2025-11-25，让客户端回退到经典的 initialize 握手流程。
+    fn supported_protocol_versions(
+        &self,
+    ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
+        use rmcp::model::ProtocolVersion;
+        std::borrow::Cow::Borrowed(&[
+            ProtocolVersion::V_2024_11_05,
+            ProtocolVersion::V_2025_03_26,
+            ProtocolVersion::V_2025_06_18,
+            ProtocolVersion::V_2025_11_25,
+        ])
     }
 }
 
