@@ -528,14 +528,19 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
         visible: Boolean(htmlEl.offsetWidth || htmlEl.offsetHeight),
       };
     };
-    const clickElement = (el: Element): Record<string, unknown> => {
-      const info = describe(el);
-      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+  const clickElement = (el: Element): Record<string, unknown> => {
+    const info = describe(el);
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+    if (el instanceof HTMLAnchorElement) {
+      // 锚点：只走 el.click() 的默认激活，避免合成 click 先触发页面 handler（可能再开一个 tab）
+      el.click();
+    } else {
       el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       if (el instanceof HTMLElement) el.click();
-      return info;
-    };
+    }
+    return info;
+  };
     const setNativeValue = (el: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
       const proto =
         el instanceof HTMLTextAreaElement
