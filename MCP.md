@@ -109,7 +109,7 @@ cd extension && pnpm install && pnpm build
 claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bridge-mcp
 ```
 
-配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`googletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
+配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`googletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
 
 ## 可用工具
 
@@ -124,6 +124,7 @@ claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bri
 
 - `googlesearch`：Google 搜索，每条结果含 title / description / url / target（target 可直接喂给 click）
 - `redditsearch`：Reddit 搜索，结构同上
+- `youtubesearch`：YouTube 搜索，每条结果含 title / channel / views / published / duration / url / target，支持上传日期（today/week/month/year）与优先顺序（relevance/popularity）筛选，max 控制最多返回条数（默认 5）；直接解析页面 HTML 里的 ytInitialData + InnerTube continuation 翻页（隐藏/被遮挡标签页照常拿满，不弹窗不抢焦点）
 - `googletrends`：Google Trends 单关键词，返回趋势序列 + 热门/上升查询（自动翻页）
 - `googletrends_compare`：多关键词走势对比（共享 0-100 刻度）
 

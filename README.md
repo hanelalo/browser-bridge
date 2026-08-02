@@ -47,6 +47,7 @@ cargo run -- set_value '#username' alice
 cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 cargo run -- googlesearch 'Haze Seas'
 cargo run -- redditsearch 'rust programming'
+cargo run -- youtubesearch 'rust programming' --time week --sort popularity --max 10
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 ```
@@ -75,6 +76,7 @@ cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 | `get-page-content` | 读取页面标题/URL/文本 |
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
+| `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
 | `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ trend[], top[], rising[] }` |
 | `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
 
@@ -118,6 +120,25 @@ cargo run -- redditsearch 'rust programming'
 
 结果页有两种渲染形态：`search-post-with-content-preview`（带正文预览）与 `search-sdui-post`（只有标题），配方同时收取；描述取自帖子正文预览，`search-sdui-post` 形态没有预览时为 `null`。Reddit 首页的搜索框藏在两层 shadow DOM 里，通用定位指令够不到，但配方直接导航到 `/search/?q=`，不依赖首页交互。
 
+### youtubesearch
+
+YouTube 搜索专用快捷指令，返回 `{ tab_id, results[] }`，每项含 `title` / `channel` / `views` / `published` / `duration` / `url` / `target`（`target` 可直接喂给 `click` 打开视频）：
+
+```sh
+cargo run -- youtubesearch 'rust programming'
+cargo run -- youtubesearch 'rust programming' --time week        # 本周上传
+cargo run -- youtubesearch 'rust programming' --sort popularity  # 热门程度优先
+cargo run -- youtubesearch 'rust programming' --time month --sort popularity
+cargo run -- youtubesearch 'rust programming' --time week --max 10   # 最多返回 10 条
+```
+
+- `--time`：上传日期筛选，`any`（默认）/ `today` / `week` / `month` / `year`
+- `--sort`：优先顺序，`relevance`（默认）/ `popularity`（热门程度）
+- `--max`：最多返回多少条结果（默认 5，至少 1）
+- 日期与排序可组合（如 `--time month --sort popularity`）
+
+筛选不是靠点击页面 UI，而是直接构造 YouTube 搜索 URL 的 `sp` 参数（今天 `EgIIAg==`、本周 `EgIIAw==`、本月 `EgIIBA==`、今年 `EgIIBQ==`；热门程度 `CAM=`；组合 token 实测自真实浏览器 2026 年的"过滤"面板）。**不依赖页面渲染**：导航返回的 HTML 里就内嵌了完整首屏数据（`ytInitialData`，约 20 条），配方直接解析它；不够 `--max` 时再取页面里的 InnerTube API key/context，用 continuation token 调 `/youtubei/v1/search` 续取（yt-dlp 同款数据源）。数据在 HTML 里就齐全，所以**标签页在后台/被全屏应用遮挡也照常拿满，不弹窗、不抢焦点、不用切过去**，实测 `--max 40` 约 3 秒返回。duration 直接取接口的 lengthText，不会缺失。若页面数据缺失（如验证墙/consent 页）会返回明确错误提示。
+
 ### googletrends
 
 Google Trends 趋势查询，返回 `{ tab_id, trend[], top[], rising[] }`：
@@ -151,6 +172,7 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
 └── recipes/              # 站点配方
     ├── googlesearch.rs   # Google 搜索（选择器 + 编排）
     ├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
+    ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
     └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
@@ -170,7 +192,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch` / `youtubesearch` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

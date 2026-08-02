@@ -8,6 +8,7 @@ use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::redditsearch::redditsearch;
+use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
 use rmcp::handler::server::wrapper::Parameters;
@@ -206,6 +207,22 @@ struct GooglesearchParams {
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct RedditsearchParams {
     query: String,
+    #[serde(default)]
+    tab_id: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct YoutubesearchParams {
+    query: String,
+    /// 上传日期筛选（默认 any；可选 today / week / month / year）
+    #[serde(default)]
+    time: Option<String>,
+    /// 优先顺序（默认 relevance；可选 popularity = 热门程度）
+    #[serde(default)]
+    sort: Option<String>,
+    /// 最多返回的结果数（默认 5）
+    #[serde(default)]
+    max: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
 }
@@ -524,6 +541,26 @@ impl BridgeMcp {
         let out = redditsearch(&mut bridge, &p.query, p.tab_id)
             .await
             .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "youtubesearch", description = "YouTube 搜索，返回 { tab_id, results[] }（title/channel/views/published/duration/url/target），支持上传日期（today/week/month/year）与优先顺序（relevance/popularity）筛选")]
+    pub async fn youtubesearch_tool(
+        &self,
+        params: Parameters<YoutubesearchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = youtubesearch(
+            &mut bridge,
+            &p.query,
+            p.time.as_deref().unwrap_or("any"),
+            p.sort.as_deref().unwrap_or("relevance"),
+            p.max.unwrap_or(5),
+            p.tab_id,
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 

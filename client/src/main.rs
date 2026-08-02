@@ -7,6 +7,7 @@ use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::redditsearch::redditsearch;
+use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
 
@@ -80,6 +81,23 @@ enum Cmd {
     Redditsearch {
         /// 搜索关键词
         query: String,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
+    /// 搜索 YouTube 并返回结构化结果（title / channel / views / published / duration / url）
+    Youtubesearch {
+        /// 搜索关键词
+        query: String,
+        /// 上传日期筛选（默认 any；today / week / month / year）
+        #[arg(long, default_value = "any")]
+        time: String,
+        /// 优先顺序（默认 relevance；popularity = 热门程度）
+        #[arg(long, default_value = "relevance")]
+        sort: String,
+        /// 最多返回的结果数（默认 5；直接解析数据并翻页续取，无需页面渲染）
+        #[arg(long, default_value_t = 5)]
+        max: usize,
         /// 指定标签页 id（默认当前激活标签页）
         #[arg(long)]
         tab: Option<i32>,
@@ -313,6 +331,29 @@ async fn main() {
                 }
             };
             match redditsearch(&mut bridge, &query, tab).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::Youtubesearch {
+            query,
+            time,
+            sort,
+            max,
+            tab,
+        } => {
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match youtubesearch(&mut bridge, &query, &time, &sort, max, tab).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
