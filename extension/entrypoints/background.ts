@@ -76,6 +76,7 @@ function connect(): void {
     socket.send(JSON.stringify({ type: 'hello', role: 'extension', name: 'browser-bridge' }));
     setStatus('connected');
     startPing(socket);
+    void closeOffscreen();
   };
 
   socket.onmessage = (event) => {
@@ -87,6 +88,7 @@ function connect(): void {
     stopPing();
     setStatus('disconnected');
     scheduleReconnect();
+    void ensureOffscreen();
   };
 
   socket.onerror = () => socket.close();
@@ -99,6 +101,35 @@ function scheduleReconnect(): void {
     reconnectDelayMs = Math.min(reconnectDelayMs * 2, 5_000);
     connect();
   }, reconnectDelayMs);
+}
+
+/** 断开期间创建 offscreen 唤醒源：它每 5 秒发消息把休眠的 worker 叫醒重连。
+ *  已连接/连接中不需要它，直接跳过。 */
+async function ensureOffscreen(): Promise<void> {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  try {
+    if (await chrome.offscreen.hasDocument()) return;
+  } catch {
+    // 旧版 Chrome 没有 hasDocument：直接尝试创建，失败即视为已存在
+  }
+  try {
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['DOM_SCRAPING'],
+      justification: '断开期间每 5 秒唤醒 service worker 重连 bridge server',
+    });
+  } catch {
+    // 已存在或创建失败：下一次 onclose 会再尝试
+  }
+}
+
+/** 连上后关闭 offscreen 唤醒源，平时零开销。 */
+async function closeOffscreen(): Promise<void> {
+  try {
+    await chrome.offscreen.closeDocument();
+  } catch {
+    // 没有文档时忽略
+  }
 }
 
 function startPing(socket: WebSocket): void {
@@ -976,6 +1007,9 @@ chrome.runtime.onMessage.addListener(
     } else if (m?.type === 'reconnect') {
       connect();
       sendResponse({ status });
+    } else if (m?.type === 'wake') {
+      // offscreen 唤醒源：worker 可能刚被拉起，直接尝试重连
+      connect();
     } else if (m?.type === 'tab_count') {
       chrome.tabs
         .query({})
@@ -988,4 +1022,6 @@ chrome.runtime.onMessage.addListener(
 
 export default defineBackground(() => {
   connect();
+  // worker 每次启动都确保唤醒源存在（若已连上，onopen 会立刻关掉它）
+  void ensureOffscreen();
 });
