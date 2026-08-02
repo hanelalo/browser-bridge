@@ -61,7 +61,7 @@ cargo run -- get-page-content
 
 ### googlesearch
 
-Google 搜索专用快捷指令，输出 JSON 数组，每项含 `title` / `description` / `url` / `target`：
+Google 搜索专用快捷指令，输出 `{ "tab_id": ..., "results": [...] }`，`tab_id` 是搜索所在标签页（供后续指令链式操作），`results` 每项含 `title` / `description` / `url` / `target`：
 
 ```sh
 cargo run -- googlesearch 'Haze Seas'

@@ -14,12 +14,14 @@ const GOOGLE_RESULT_DESC: &str = "div[data-sncf='1'] > div";
 // 点击定位用（语义化：#rso 结果区里包含 h3 标题的链接，顺序与过滤后结果一致）
 const GOOGLE_RESULT_TARGET: &str = "#rso a:has(h3)";
 
-/// Google 搜索：导航到搜索结果页，提取 title / description / url，输出 JSON 数组。
+/// Google 搜索：导航到搜索结果页，提取 title / description / url。
+/// 输出 `{ "tab_id": ..., "results": [...] }`，tab_id 供后续指令在同一标签页上链式操作。
 pub async fn googlesearch(server: &str, query: &str, tab: Option<i32>) -> Result<(), String> {
     let mut ws = connect_bridge(server).await?;
 
     let url = format!("https://www.google.com/search?q={}", urlencode(query));
-    request(&mut ws, "gs1", "navigate", json!({ "url": url, "tab_id": tab })).await?;
+    let nav = request(&mut ws, "gs1", "navigate", json!({ "url": url, "tab_id": tab })).await?;
+    let tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
 
     let scraped = request(
         &mut ws,
@@ -69,6 +71,10 @@ pub async fn googlesearch(server: &str, query: &str, tab: Option<i32>) -> Result
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+    let out = json!({
+        "tab_id": tab_id,
+        "results": results,
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
     Ok(())
 }
