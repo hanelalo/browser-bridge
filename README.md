@@ -112,7 +112,7 @@ cargo run -- googlesearch 'Haze Seas'
 
 ### redditsearch
 
-Reddit 搜索专用快捷指令，返回结构与 `googlesearch` 一致（`{ tab_id, results[] }`，每项 `title` / `description` / `url` / `target`）：
+Reddit 搜索专用快捷指令，返回 `{ tab_id, results[] }`，每项含 `title` / `description` / `published`（相对时间，如 `1mo ago`）/ `published_at`（ISO 时间戳）/ `votes`（整数）/ `comments`（整数）/ `url` / `target`：
 
 ```sh
 cargo run -- redditsearch 'rust programming'

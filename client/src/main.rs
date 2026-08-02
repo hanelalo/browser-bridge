@@ -77,7 +77,7 @@ enum Cmd {
         #[arg(long)]
         tab: Option<i32>,
     },
-    /// 搜索 Reddit 并返回结构化结果（JSON 数组：title / description / url）
+    /// 搜索 Reddit 并返回结构化结果（JSON 数组：title / description / published / published_at / votes / comments / url；votes/comments 为整数数量）
     Redditsearch {
         /// 搜索关键词
         query: String,

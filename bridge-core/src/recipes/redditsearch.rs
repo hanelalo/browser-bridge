@@ -16,8 +16,29 @@ const REDDIT_RESULT_DESC: &str =
     "div[data-testid=\"sdui-post-unit\"] > search-telemetry-tracker > a";
 // 点击定位用（语义化：结果卡片上的覆盖链接，顺序与过滤后结果一致）
 const REDDIT_RESULT_TARGET: &str = "a[data-testid=\"post-title\"]";
+// 发布时间：faceplate-timeago 的文本是相对时间（如 "1mo ago"），ts 属性是 ISO 时间戳
+const REDDIT_RESULT_TIME: &str = "faceplate-timeago";
+const REDDIT_RESULT_TIME_TS: &str = "faceplate-timeago@ts";
+// 投票/评论：search-counter-row 里 votes 在前、comments 在后（中间是分隔符 span），
+// 取 faceplate-number 的 number 属性（原始数值，非格式化文本如 "1.2k"）
+const REDDIT_RESULT_VOTES: &str =
+    "div[data-testid=\"search-counter-row\"] span:first-child faceplate-number@number";
+const REDDIT_RESULT_COMMENTS: &str =
+    "div[data-testid=\"search-counter-row\"] span:last-child faceplate-number@number";
 
-/// Reddit 搜索：导航到搜索结果页，提取 title / description / url。
+/// 把 scrape 返回的数字字符串转成 JSON 整数，解析失败（如缺字段）返回 null。
+fn as_count(v: Option<&Value>) -> Value {
+    match v
+        .and_then(Value::as_str)
+        .and_then(|s| s.trim().parse::<i64>().ok())
+    {
+        Some(n) => json!(n),
+        None => Value::Null,
+    }
+}
+
+/// Reddit 搜索：导航到搜索结果页，提取 title / description / url / published /
+/// published_at / votes / comments。
 /// 返回 `{ "tab_id": ..., "results": [...] }`，tab_id 供后续指令在同一标签页上链式操作。
 pub async fn redditsearch(
     bridge: &mut Bridge,
@@ -40,6 +61,10 @@ pub async fn redditsearch(
                     "title": REDDIT_RESULT_TITLE,
                     "url": REDDIT_RESULT_URL,
                     "description": REDDIT_RESULT_DESC,
+                    "published": REDDIT_RESULT_TIME,
+                    "published_at": REDDIT_RESULT_TIME_TS,
+                    "votes": REDDIT_RESULT_VOTES,
+                    "comments": REDDIT_RESULT_COMMENTS,
                 },
                 "timeout": 10_000,
                 "tab_id": tab,
@@ -72,6 +97,10 @@ pub async fn redditsearch(
             json!({
                 "title": it.get("title").cloned().unwrap_or(Value::Null),
                 "description": it.get("description").cloned().unwrap_or(Value::Null),
+                "published": it.get("published").cloned().unwrap_or(Value::Null),
+                "published_at": it.get("published_at").cloned().unwrap_or(Value::Null),
+                "votes": as_count(it.get("votes")),
+                "comments": as_count(it.get("comments")),
                 "url": it.get("url").cloned().unwrap_or(Value::Null),
                 "target": target,
             })

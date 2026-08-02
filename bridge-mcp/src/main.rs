@@ -531,7 +531,7 @@ impl BridgeMcp {
         ok(out)
     }
 
-    #[tool(name = "redditsearch", description = "Reddit 搜索，返回 { tab_id, results[] }（title/description/url/target）")]
+    #[tool(name = "redditsearch", description = "Reddit 搜索，返回 { tab_id, results[] }（title/description/published/published_at/votes/comments/url/target；votes/comments 为整数 upvote/评论数量，published_at 为 ISO 时间戳）")]
     pub async fn redditsearch_tool(
         &self,
         params: Parameters<RedditsearchParams>,

@@ -148,9 +148,9 @@ Google 搜索。复用当前标签页导航到搜索结果页，**不新建标�
 
 #### redditsearch
 
-Reddit 搜索。直接导航到 Reddit 的 `/search/?q=` 结果页，不依赖首页交互，复用当前标签页、**不新建标签页**。参数与返回结构同 `googlesearch`（`query` 必填，`tab_id` 可选）。
+Reddit 搜索。直接导航到 Reddit 的 `/search/?q=` 结果页，不依赖首页交互，复用当前标签页、**不新建标签页**。参数与 `googlesearch` 一致（`query` 必填，`tab_id` 可选）。
 
-返回：`{ "tab_id": int, "results": [ { "title", "description", "url", "target" } ] }`。结果页有两种渲染形态（带正文预览 / 仅标题），配方同时收取；无预览时 `description` 为 `null`。
+返回：`{ "tab_id": int, "results": [ { "title", "description", "published", "published_at", "votes", "comments", "url", "target" } ] }`。`published` 为相对时间文本（如 `1mo ago`），`published_at` 为 ISO 时间戳；`votes` / `comments` 为整数（upvote / 评论数，取页面里的原始数值而非格式化文本）。结果页有两种渲染形态（带正文预览 / 仅标题），配方同时收取；无预览时 `description` 为 `null`。
 
 #### youtubesearch
 
