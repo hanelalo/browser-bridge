@@ -37,27 +37,37 @@ pnpm dev             # 会自动打开 Chrome 并加载开发版插件
 ```sh
 cd client
 cargo run -- list-tabs
-cargo run -- new-tab https://example.com                # 新建标签页
-cargo run -- activate-tab --tab 7                        # 切换到指定标签页
-cargo run -- close-tab                                   # 关闭当前激活标签页
-cargo run -- close-tab --tab 7                           # 关闭指定标签页
 cargo run -- navigate https://example.com
-cargo run -- click '#submit'                         # CSS 选择器
-cargo run -- click '登录' --by text                  # 按文本定位
-cargo run -- click_at 120 340                        # 按坐标点击
-cargo run -- press_key Enter
-cargo run -- press_key a --modifier ctrl             # Ctrl+A
-cargo run -- press_key Enter --wait-load              # 回车触发导航后等页面加载
-cargo run -- scroll --dy 800
+cargo run -- click '#submit'
 cargo run -- set_value '#username' alice
-cargo run -- check '#agree'
-cargo run -- check '#agree' --uncheck
-cargo run -- select_option '#city' --text 北京
-cargo run -- get_value '#username'
-cargo run -- run-script 'document.title'             # 在页面里执行任意 JS
 cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
-cargo run -- get-page-content
+cargo run -- googlesearch 'Haze Seas'
 ```
+
+### 指令速查表
+
+| 指令 | 作用 |
+|------|------|
+| `list-tabs` | 列出所有标签页 |
+| `new-tab [url]` | 新建标签页（可指定 URL） |
+| `activate-tab --tab <id>` | 切换标签页并聚焦窗口 |
+| `close-tab [--tab <id>]` | 关闭标签页（默认当前激活页） |
+| `navigate <url>` | 导航并等待页面加载完成 |
+| `click <target>` | 点击匹配定位的元素 |
+| `click-at <x> <y>` | 按坐标点击 |
+| `press-key <key>` | 模拟按键（支持修饰键、`--wait-load`） |
+| `scroll --dx --dy` | 滚动窗口或指定容器 |
+| `set-value <target> <value>` | 设置 input/textarea/contenteditable 的值 |
+| `check <target>` | 勾选/取消 checkbox、radio |
+| `select-option <target> --text/--value/--option-index` | 选中下拉项 |
+| `clear <target>` | 清空输入类元素 |
+| `get-value <target>` | 读取元素当前值 |
+| `scrape <item> --fields '...'` | 按选择器提取结构化数据 |
+| `run-script '<js>'` | 页面里执行任意 JS，返回 JSON |
+| `get-page-content` | 读取页面标题/URL/文本 |
+| `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
+
+多数指令支持 `--tab <id>` 指定标签页，默认操作当前激活页。
 
 ### googlesearch
 
@@ -68,6 +78,35 @@ cargo run -- googlesearch 'Haze Seas'
 ```
 
 `target` 是可直接喂给 `click` 的元素定位（`{ by, value, index }`），方便后续点击某个结果。实现是 client 侧的"站点配方"：用通用原语 `navigate` + `scrape` 编排，选择器作为常量集中在 client 里（`#rso > div` 容器、`data-sncf='1'` 描述等），扩展与协议保持通用。
+
+### client 结构
+
+```text
+client/src/
+├── main.rs               # CLI 子命令 + 分发（通用壳）
+├── bridge.rs             # 传输层：连接 / 请求 / URL 编码
+├── target.rs             # 元素定位参数（css / text / xpath）
+└── recipes/              # 站点配方
+    └── googlesearch.rs   # Google 搜索（选择器 + 编排）
+```
+
+加新站点搜索只需在 `recipes/` 里加一个文件，并在 `main.rs` 注册子命令，协议与扩展无需改动。
+
+## 构建产物（发布）
+
+开发时用 `cargo run` / `pnpm dev`；正式使用前执行一键构建：
+
+```sh
+./scripts/build.sh
+```
+
+产物：
+
+| 产物 | 路径 | 用途 |
+|------|------|------|
+| `bridge-server` | `target/release/bridge-server` | 常驻 WebSocket 枢纽，直接运行 |
+| `bridge-client` | `target/release/bridge-client` | 发指令的 CLI，直接运行 |
+| 扩展 | `extension/dist/chrome-mv3` | `chrome://extensions` 加载已解压目录 |
 
 ### 元素定位
 
@@ -106,6 +145,7 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 | server 端口 | 9225 | 环境变量 `BRIDGE_PORT` |
 | 插件连接地址 | `ws://127.0.0.1:9225` | 构建时 `WXT_PUBLIC_BRIDGE_URL=ws://... pnpm build` |
 | client 服务地址 | `ws://127.0.0.1:9225` | `--server` 或环境变量 `BRIDGE_SERVER` |
+| Chrome 版本 | 120+ | `run_script` 需要 `chrome.userScripts`（135+ 体验最佳） |
 
 ## 安全说明
 
