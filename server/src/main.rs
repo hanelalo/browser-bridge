@@ -472,6 +472,7 @@ mod tests {
                 conn_id: 1,
                 role: Role::Extension,
                 name: "chrome".into(),
+                client_id: None,
                 tx: ext_tx,
             })
             .unwrap();
@@ -481,6 +482,7 @@ mod tests {
                 conn_id: 2,
                 role: Role::Client,
                 name: "cli".into(),
+                client_id: Some("cli".into()),
                 tx: cli_tx,
             })
             .unwrap();
@@ -502,6 +504,8 @@ mod tests {
         let forwarded: WireMessage = serde_json::from_str(&forwarded).unwrap();
         assert_eq!(forwarded.id.as_deref(), Some("r1"));
         assert_eq!(forwarded.method.as_deref(), Some("navigate"));
+        // server 应盖章来源客户端身份，供扩展记录标签页归属
+        assert_eq!(forwarded.client_id.as_deref(), Some("cli"));
 
         hub_tx
             .send(HubMsg::Forward {
@@ -534,6 +538,7 @@ mod tests {
                 conn_id: 2,
                 role: Role::Client,
                 name: "cli".into(),
+                client_id: Some("cli".into()),
                 tx: cli_tx,
             })
             .unwrap();

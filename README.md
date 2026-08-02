@@ -123,7 +123,7 @@ cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 ```
 
 - `trend`：时间序列 `[{ date, value }]`，`value` 为 0-100 相对热度（从图表 SVG 曲线坐标反解 + y 轴刻度校准）
-- `top` / `rising`：热门查询与热度上升的查询（排名、关键词、热度、变化百分比）
+- `top` / `rising`：热门查询与热度上升的查询（排名、关键词、热度、变化百分比），自动翻完所有分页（每表一般 5 页共 50 条，上限 10 页）
 - `--date` 支持 `today 1-m`（默认）/ `today 3-m` / `today 12-m` / `today 5-y` / `all`，`--geo` 默认 `Worldwide`
 - 关键词表是懒加载的，需要滚动到底部才渲染，配方会自动滚动内部容器等待表格数据
 - 每次查询新开一个标签页（同标签页反复导航时图表偶发不加载，新标签页稳定），这些标签页会被扩展记录，可用 `close-auto-tabs` 清理

@@ -101,7 +101,7 @@ fn trends_script(date_spec: &str) -> String {
   const dates = buildDates(DATE_SPEC, values.length);
   const trend = values.map((v, i) => ({{ date: dates[i] || null, value: v }}));
 
-  // --- 关键词表：第一张=热门，第二张=上升 ---
+  // --- 关键词表：第一张=热门，第二张=上升；各表自动翻页（最多 10 页，实际一般 5 页 50 条） ---
   const parseTable = (table) => Array.from(table.querySelectorAll('tbody tr')).map((tr, i) => {{
     const cells = Array.from(tr.querySelectorAll('td'));
     if (cells.length < 3) return null;
@@ -118,9 +118,36 @@ fn trends_script(date_spec: &str) -> String {
     const rank = /^\d+$/.test(rankText) ? parseInt(rankText, 10) : i + 1;
     return {{ rank, query, interest: Number.isFinite(interest) ? interest : null, change }};
   }}).filter(Boolean);
-  const tables = Array.from(document.querySelectorAll('table'));
-  const top = tables[0] ? parseTable(tables[0]) : [];
-  const rising = tables[1] ? parseTable(tables[1]) : [];
+  // 表格和下一页按钮都按 x 排序一一对应（aria-label 本地化，不能写死文案）
+  const tables = Array.from(document.querySelectorAll('table')).sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
+  const nextBtns = Array.from(document.querySelectorAll('button')).filter((b) => {{
+    const a = b.getAttribute('aria-label') || '';
+    return /下一页|next page|next/i.test(a);
+  }}).sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
+  const isDisabled = (btn) => btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.hasAttribute('disabled');
+  const collect = async (table, nextBtn) => {{
+    const seen = new Set();
+    const rows = [];
+    for (let p = 0; p < 10; p++) {{
+      const pageRows = parseTable(table);
+      for (const r of pageRows) {{
+        if (!seen.has(r.rank)) {{ rows.push(r); seen.add(r.rank); }}
+      }}
+      if (isDisabled(nextBtn) || p === 9) break;
+      nextBtn.click();
+      // 等翻页完成：首行 rank 变为未见过，或按钮禁用，最多 5 秒
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {{
+        const fr = parseTable(table)[0];
+        if (fr && !seen.has(fr.rank)) break;
+        if (isDisabled(nextBtn)) break;
+        await sleep(300);
+      }}
+    }}
+    return rows;
+  }};
+  const top = tables[0] ? await collect(tables[0], nextBtns[0]) : [];
+  const rising = tables[1] ? await collect(tables[1], nextBtns[1]) : [];
   const tablesAvailable = top.length > 0 || rising.length > 0;
   return {{ trend, top, rising, tables_available: tablesAvailable }};
 }})()"#

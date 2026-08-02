@@ -269,7 +269,7 @@ impl BridgeMcp {
         call(&self.bridge, "ct", "close_tab", json!({ "tab_id": params.0.tab_id })).await
     }
 
-    #[tool(name = "close_auto_tabs", description = "关闭本会话（当前 MCP 进程）自动打开的标签页，不影响其他会话")]
+    #[tool(name = "close_auto_tabs", description = "关闭本会话（当前 MCP 进程）自动打开的标签页（new_tab / click --new-tab / googletrends 创建的），不影响其他会话。流程结束时请务必调用本工具，清理本次任务创建的标签页，避免浏览器堆积")]
     pub async fn close_auto_tabs(&self) -> Result<CallToolResult, ErrorData> {
         call(
             &self.bridge,
