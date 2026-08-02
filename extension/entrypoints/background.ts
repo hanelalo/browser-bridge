@@ -14,6 +14,10 @@ let status: 'connecting' | 'connected' | 'disconnected' = 'disconnected';
 // 存 chrome.storage.session，service worker 重启也不丢；浏览器重启后自然失效。
 let autoTabs: Set<number> = new Set();
 
+// click 请求 new_tab 时的捕获窗口：预登记源标签页，onCreated 按 openerTabId 精确关联
+let newTabClickUntil = 0;
+let newTabClickSourceTab: number | null = null;
+
 async function saveAutoTabs(): Promise<void> {
   try {
     await chrome.storage.session.set({ autoTabs: Array.from(autoTabs) });
@@ -29,6 +33,17 @@ void (async () => {
   } catch {
     // ignore
   }
+  chrome.tabs.onCreated.addListener((tab) => {
+    if (
+      Date.now() <= newTabClickUntil &&
+      tab.openerTabId != null &&
+      tab.openerTabId === newTabClickSourceTab &&
+      tab.id != null
+    ) {
+      autoTabs.add(tab.id);
+      void saveAutoTabs();
+    }
+  });
   chrome.tabs.onRemoved.addListener((id) => {
     if (autoTabs.delete(id)) void saveAutoTabs();
   });
@@ -176,14 +191,35 @@ function normalizeTarget(params: Record<string, unknown>): Record<string, unknow
 async function runPageOp(op: string, params: Record<string, unknown>): Promise<unknown> {
   const tab = await resolveTab(params.tab_id as number | undefined);
   if (tab.id == null) throw new Error('tab has no id');
-  const [result] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: pageOp,
-    args: [op, params],
-  });
-  const r = (result?.result ?? {}) as { __bridge_error?: string };
-  if (r.__bridge_error) throw new Error(r.__bridge_error);
-  return { ...r, tab_id: tab.id };
+  // 预登记：本次点击要求新开标签页时，开 3 秒窗口等 onCreated 按 openerTabId 捕获
+  if ((op === 'click' || op === 'click_at') && params.new_tab === true) {
+    newTabClickUntil = Date.now() + 3000;
+    newTabClickSourceTab = tab.id;
+  }
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: pageOp,
+      args: [op, params],
+    });
+    const r = (result?.result ?? {}) as { __bridge_error?: string };
+    if (r.__bridge_error) throw new Error(r.__bridge_error);
+    // new_tab 锚点：由扩展创建标签页，精确记录并返回新 tab id，便于后续链式操作
+    if (typeof r.open_url === 'string' && r.open_url) {
+      const nt = await chrome.tabs.create({ url: r.open_url });
+      if (nt.id != null) {
+        autoTabs.add(nt.id);
+        void saveAutoTabs();
+      }
+      const { open_url: _openUrl, ...rest } = r;
+      return { ...rest, tab_id: nt.id };
+    }
+    return { ...r, tab_id: tab.id };
+  } catch (err) {
+    // 操作失败则作废捕获窗口，避免误记
+    newTabClickUntil = 0;
+    throw err;
+  }
 }
 
 /** 模拟按键；可选 wait_load：按键触发导航后等页面加载完成。 */
@@ -576,14 +612,21 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
         visible: Boolean(htmlEl.offsetWidth || htmlEl.offsetHeight),
       };
     };
-  const clickElement = (el: Element, newTab = false): Record<string, unknown> => {
+  const clickElement = (
+    el: Element,
+    newTab = false,
+  ): { info: Record<string, unknown>; open_url?: string } => {
     const info = describe(el);
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
     if (el instanceof HTMLAnchorElement) {
-      // 锚点：只走 el.click() 的默认激活，避免合成 click 先触发页面 handler；
-      // 默认覆盖 target=_blank 在当前标签页打开，防止流程开新 tab 堆积，new_tab=true 时保留原行为
-      if (!newTab && el.target === '_blank') {
+      if (newTab) {
+        // new_tab：不派发 click，href 交给 background 用 tabs.create 打开，
+        // 这样新标签页 id 精确可知，可直接记入 autoTabs 并返回给调用方
+        return { info, open_url: el.href };
+      }
+      // 默认：覆盖 target=_blank 在当前标签页打开，防止流程开新 tab 堆积
+      if (el.target === '_blank') {
         el.target = '_self';
         el.click();
         el.target = '_blank';
@@ -594,7 +637,7 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
       el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       if (el instanceof HTMLElement) el.click();
     }
-    return info;
+    return { info };
   };
     const setNativeValue = (el: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
       const proto =
@@ -695,7 +738,8 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
         }
         const el = document.elementFromPoint(x, y);
         if (!el) throw new Error(`no element at (${x}, ${y})`);
-        return { clicked: clickElement(el, params.new_tab === true), x, y };
+        const { info, open_url } = clickElement(el, params.new_tab === true);
+        return open_url ? { clicked: info, x, y, open_url } : { clicked: info, x, y };
       }
 
       if (op === 'scroll') {
@@ -805,8 +849,10 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
       const el = await waitForElement(params.target, timeoutMs);
 
       switch (op) {
-        case 'click':
-          return { clicked: clickElement(el, params.new_tab === true) };
+        case 'click': {
+          const { info, open_url } = clickElement(el, params.new_tab === true);
+          return open_url ? { clicked: info, open_url } : { clicked: info };
+        }
         case 'set_value': {
           const value = String(params.value ?? '');
           if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {

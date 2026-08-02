@@ -173,7 +173,7 @@ params：
 ```
 
 `timeout` 可选，默认 5000。
-`new_tab` 可选，默认 `false`：点击锚点链接时默认在当前标签页打开（覆盖 `target="_blank"`，避免流程开新标签页堆积）；设为 `true` 则保留站点默认的新标签页行为。
+`new_tab` 可选，默认 `false`：点击锚点链接时默认在当前标签页打开（覆盖 `target="_blank"`，避免流程开新标签页堆积）；设为 `true` 时由扩展创建新标签页打开（记录为自动打开的标签页，响应中的 `tab_id` 是新标签页的 id，可被 `close_auto_tabs` 清理）。
 
 result：
 
