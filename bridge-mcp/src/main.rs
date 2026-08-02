@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
+use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
@@ -211,6 +212,18 @@ struct RedditsearchParams {
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct GoogletrendsParams {
     query: String,
+    /// 时间范围（默认 today 1-m；如 today 3-m / today 12-m / today 5-y / all）
+    #[serde(default)]
+    date: Option<String>,
+    /// 地区（默认 Worldwide）
+    #[serde(default)]
+    geo: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct GoogletrendsCompareParams {
+    /// 要对比的关键词列表（2 个及以上效果最好）
+    terms: Vec<String>,
     /// 时间范围（默认 today 1-m；如 today 3-m / today 12-m / today 5-y / all）
     #[serde(default)]
     date: Option<String>,
@@ -523,6 +536,24 @@ impl BridgeMcp {
         let out = googletrends(
             &mut bridge,
             &p.query,
+            p.date.as_deref().unwrap_or("today 1-m"),
+            p.geo.as_deref().unwrap_or("Worldwide"),
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "googletrends_compare", description = "Google Trends 关键词对比，返回 { series[] }，每个词一条趋势序列（共享 0-100 刻度，不返回热门/上升表）")]
+    pub async fn googletrends_compare_tool(
+        &self,
+        params: Parameters<GoogletrendsCompareParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = googletrends_compare(
+            &mut bridge,
+            &p.terms,
             p.date.as_deref().unwrap_or("today 1-m"),
             p.geo.as_deref().unwrap_or("Worldwide"),
         )

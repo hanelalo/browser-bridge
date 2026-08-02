@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
+use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
@@ -87,6 +88,18 @@ enum Cmd {
     Googletrends {
         /// 搜索关键词
         query: String,
+        /// 时间范围（默认 today 1-m；如 today 3-m / today 12-m / today 5-y / all）
+        #[arg(long, default_value = "today 1-m")]
+        date: String,
+        /// 地区（默认 Worldwide）
+        #[arg(long, default_value = "Worldwide")]
+        geo: String,
+    },
+    /// 对比多个关键词在 Google Trends 的走势（共享 0-100 刻度）
+    GoogletrendsCompare {
+        /// 关键词（可多个；逗号分隔的写法也会被拆分）
+        #[arg(required = true)]
+        terms: Vec<String>,
         /// 时间范围（默认 today 1-m；如 today 3-m / today 12-m / today 5-y / all）
         #[arg(long, default_value = "today 1-m")]
         date: String,
@@ -317,6 +330,28 @@ async fn main() {
                 }
             };
             match googletrends(&mut bridge, &query, &date, &geo).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::GoogletrendsCompare { terms, date, geo } => {
+            let terms: Vec<String> = terms
+                .iter()
+                .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match googletrends_compare(&mut bridge, &terms, &date, &geo).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");

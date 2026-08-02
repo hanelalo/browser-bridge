@@ -46,6 +46,7 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 cargo run -- googlesearch 'Haze Seas'
 cargo run -- redditsearch 'rust programming'
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
+cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 ```
 
 ### 指令速查表
@@ -73,6 +74,7 @@ cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 | `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ trend[], top[], rising[] }` |
+| `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
 
 多数指令支持 `--tab <id>` 指定标签页，默认操作当前激活页。
 
@@ -128,6 +130,16 @@ cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 - 关键词表是懒加载的，需要滚动到底部才渲染，配方会自动滚动内部容器等待表格数据
 - 每次查询新开一个标签页（同标签页反复导航时图表偶发不加载，新标签页稳定），这些标签页会被扩展记录，可用 `close-auto-tabs` 清理
 
+### googletrends-compare
+
+多关键词走势对比，返回 `{ tab_id, terms[], date, geo, series[] }`，每个关键词一条趋势序列。**共享 0-100 刻度**（100 = 所有词中的最高峰值），便于直接比较；不返回热门/上升查询表：
+
+```sh
+cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m' --geo Worldwide
+```
+
+`terms` 也可用逗号分隔写成一个参数（`'ai image,GPTs'`）。`--date` / `--geo` 与 `googletrends` 一致。
+
 ### client 结构
 
 ```text
@@ -154,7 +166,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch` / `googletrends`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

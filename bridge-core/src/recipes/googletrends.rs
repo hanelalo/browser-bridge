@@ -154,6 +154,112 @@ fn trends_script(date_spec: &str) -> String {
     )
 }
 
+/// 对比模式脚本：解析多折线（每个关键词一条线，mask 序号对应查询顺序），返回各词趋势序列。
+fn compare_script(terms: &[String], date_spec: &str) -> String {
+    let date_lit = serde_json::to_string(date_spec).unwrap_or_else(|_| "\"today 1-m\"".into());
+    let terms_json = serde_json::to_string(terms).unwrap_or_else(|_| "[]".into());
+    format!(
+        r#"(async () => {{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const TERMS = {terms_json};
+  const N = TERMS.length;
+  const deadline = Date.now() + 20000;
+  const scrollAll = () => {{
+    window.scrollTo(0, document.body.scrollHeight);
+    Array.from(document.querySelectorAll('div')).forEach((el) => {{
+      if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
+    }});
+  }};
+  let svg = null;
+  let lines = null;
+  while (Date.now() < deadline) {{
+    svg = Array.from(document.querySelectorAll('svg')).find((s) => s.getBoundingClientRect().width > 100);
+    if (svg) {{
+      // 每条线画了两遍（inverse mask 与普通 mask），取 inverse 的一套，mask 序号即线序
+      lines = Array.from(svg.querySelectorAll('path')).filter((p) => {{
+        const d = p.getAttribute('d') || '';
+        const m = p.getAttribute('mask') || '';
+        return d.length > 1500 && m.includes('inverse-mask');
+      }});
+      if (lines.length === N) break;
+    }}
+    scrollAll();
+    await sleep(300);
+  }}
+  if (!lines || lines.length !== N) {{
+    return {{ error: 'comparison chart not loaded (expected ' + N + ' lines, got ' + (lines ? lines.length : 0) + ')' }};
+  }}
+  const maskIdx = (p) => {{
+    const m = (p.getAttribute('mask') || '').match(/timeline-inverse-mask-\d+-(\d+)/);
+    return m ? parseInt(m[1], 10) : 0;
+  }};
+  lines.sort((a, b) => maskIdx(a) - maskIdx(b));
+
+  const parseLine = (p) => {{
+    const d = p.getAttribute('d');
+    const cmds = d.match(/[MC]/g) || [];
+    const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
+    let ni = 0;
+    const ys = [];
+    for (const c of cmds) {{
+      if (c === 'M') {{ ys.push(nums[ni + 1]); ni += 2; }}
+      else {{ ys.push(nums[ni + 5]); ni += 6; }}
+    }}
+    return ys;
+  }};
+  const vb = (svg.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number);
+  const svgTop = svg.getBoundingClientRect().y;
+  const labelY = {{}};
+  Array.from(document.querySelectorAll('svg text')).forEach((t) => {{
+    const v = t.textContent.trim();
+    if (v === '0' && labelY['0'] == null) labelY['0'] = t.getBoundingClientRect().y - svgTop;
+    if (v === '100' && labelY['100'] == null) labelY['100'] = t.getBoundingClientRect().y - svgTop;
+  }});
+  const y0 = labelY['0'] != null ? labelY['0'] : (vb[3] || 320);
+  const y100 = labelY['100'] != null ? labelY['100'] : 0;
+  const span = (y0 - y100) || 1;
+  const toValue = (y) => Math.max(0, Math.min(100, Math.round(((y0 - y) / span) * 100)));
+
+  // 日期：与单查询一致，从今天倒推
+  const DATE_SPEC = {date_lit};
+  const fmt = (dd) => dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0') + '-' + String(dd.getDate()).padStart(2, '0');
+  const buildDates = (spec, n) => {{
+    const now = new Date();
+    let end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let start = null;
+    const m = spec.match(/^today\s+(\d+)-([my])$/);
+    if (m) {{
+      const k = parseInt(m[1], 10);
+      start = new Date(end);
+      if (m[2] === 'm') start.setMonth(end.getMonth() - k);
+      else start.setFullYear(end.getFullYear() - k);
+    }} else if (spec === 'all') {{
+      start = new Date(2004, 0, 1);
+    }} else {{
+      const dm = spec.match(/^(\d{{4}}-\d{{2}}-\d{{2}})\s+(\d{{4}}-\d{{2}}-\d{{2}})$/);
+      if (dm) {{ start = new Date(dm[1]); end = new Date(dm[2]); }}
+    }}
+    if (!start || n <= 0) return Array(n).fill(null);
+    const days = Math.round((end - start) / 86400000);
+    const back = (offset) => new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset);
+    if (Math.abs(n - days) <= 2) return Array.from({{ length: n }}, (_, i) => fmt(back(n - 1 - i)));
+    const weekly = Math.round(days / 7);
+    if (Math.abs(n - weekly) <= 2) return Array.from({{ length: n }}, (_, i) => fmt(back((n - 1 - i) * 7)));
+    return Array.from({{ length: n }}, (_, i) => fmt(back(Math.round(((n - 1 - i) * days) / (n - 1 || 1)))));
+  }};
+
+  const counts = lines.map(parseLine);
+  const n = counts[0].length;
+  const dates = buildDates(DATE_SPEC, n);
+  const series = TERMS.map((term, i) => {{
+    const trend = counts[i].map((y, j) => ({{ date: dates[j] || null, value: toValue(y) }}));
+    return {{ term, trend }};
+  }});
+  return {{ series }};
+}})()"#
+    )
+}
+
 /// Google Trends：查询搜索趋势，返回趋势序列 + 热门/上升关键词。
 /// 返回 `{ "tab_id": ..., "query": ..., "date": ..., "geo": ..., "trend": [...], "top": [...], "rising": [...] }`。
 pub async fn googletrends(
@@ -232,4 +338,75 @@ pub async fn googletrends(
     }
 
     Ok(out)
+}
+
+/// Google Trends 关键词对比：多个关键词的走势对比（共享 0-100 刻度，不返回热门/上升表）。
+/// 返回 `{ "tab_id": ..., "date": ..., "geo": ..., "series": [{ "term": ..., "trend": [...] }] }`。
+pub async fn googletrends_compare(
+    bridge: &mut Bridge,
+    terms: &[String],
+    date: &str,
+    geo: &str,
+) -> Result<Value, String> {
+    if terms.is_empty() {
+        return Err("googletrends-compare: 至少需要一个关键词".to_string());
+    }
+    let date = if date.trim().is_empty() { DEFAULT_DATE } else { date };
+    let geo = if geo.trim().is_empty() { DEFAULT_GEO } else { geo };
+    let q = terms
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    let url = format!(
+        "https://trends.google.com/explore?q={}&date={}&geo={}",
+        urlencode(&q),
+        urlencode(date),
+        urlencode(geo)
+    );
+
+    let script = compare_script(terms, date);
+    let mut tab_id = Value::Null;
+    let mut data = Value::Null;
+    for attempt in 0..3 {
+        let nav = bridge.request("gtc1", "new_tab", json!({ "url": url })).await?;
+        tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
+        let resp = bridge
+            .request(
+                "gtc2",
+                "run_script",
+                json!({ "code": script, "tab_id": tab_id }),
+            )
+            .await?;
+        let got = resp.get("result").cloned().unwrap_or(Value::Null);
+        let is_chart_error = got
+            .get("error")
+            .and_then(Value::as_str)
+            .map(|s| s.contains("chart not loaded"))
+            .unwrap_or(false);
+        if !is_chart_error {
+            data = got;
+            break;
+        }
+        if tab_id.is_number() {
+            let _ = bridge
+                .request("gtc3", "close_tab", json!({ "tab_id": tab_id }))
+                .await;
+        }
+        if attempt == 2 {
+            data = got;
+        }
+    }
+    if let Some(err) = data.get("error").and_then(Value::as_str) {
+        return Err(format!("googletrends-compare: {err}"));
+    }
+
+    Ok(json!({
+        "tab_id": tab_id,
+        "terms": terms,
+        "date": date,
+        "geo": geo,
+        "series": data.get("series").cloned().unwrap_or_else(|| json!([])),
+    }))
 }
