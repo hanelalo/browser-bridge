@@ -8,6 +8,7 @@ use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::redditsearch::redditsearch;
+use bridge_core::recipes::youtubeinfo::youtubeinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
@@ -223,6 +224,14 @@ struct YoutubesearchParams {
     /// 最多返回的结果数（默认 5）
     #[serde(default)]
     max: Option<usize>,
+    #[serde(default)]
+    tab_id: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct YoutubeinfoParams {
+    /// 视频 URL 或 11 位视频 ID（watch?v= / youtu.be / shorts / embed / live 均可）
+    url: String,
     #[serde(default)]
     tab_id: Option<i32>,
 }
@@ -561,6 +570,19 @@ impl BridgeMcp {
         )
         .await
         .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "youtubeinfo", description = "获取指定 YouTube 视频详情，返回 { tab_id, video }（url/title/author/author_url/duration/duration_seconds/like_count/comment_count/subscriber_count/captions[]，字幕为全文，各计数同时附 *_text 原始文本）")]
+    pub async fn youtubeinfo_tool(
+        &self,
+        params: Parameters<YoutubeinfoParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = youtubeinfo(&mut bridge, &p.url, p.tab_id)
+            .await
+            .map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 

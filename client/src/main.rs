@@ -7,6 +7,7 @@ use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::redditsearch::redditsearch;
+use bridge_core::recipes::youtubeinfo::youtubeinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
@@ -98,6 +99,14 @@ enum Cmd {
         /// 最多返回的结果数（默认 5；直接解析数据并翻页续取，无需页面渲染）
         #[arg(long, default_value_t = 5)]
         max: usize,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
+    /// 获取指定 YouTube 视频的详情（字幕全文、URL、作者、时长、点赞/评论/订阅数）
+    Youtubeinfo {
+        /// 视频 URL 或 11 位视频 ID（watch?v= / youtu.be / shorts / embed / live 均可）
+        url: String,
         /// 指定标签页 id（默认当前激活标签页）
         #[arg(long)]
         tab: Option<i32>,
@@ -354,6 +363,23 @@ async fn main() {
                 }
             };
             match youtubesearch(&mut bridge, &query, &time, &sort, max, tab).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::Youtubeinfo { url, tab } => {
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match youtubeinfo(&mut bridge, &url, tab).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");

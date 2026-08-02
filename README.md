@@ -48,6 +48,7 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 cargo run -- googlesearch 'Haze Seas'
 cargo run -- redditsearch 'rust programming'
 cargo run -- youtubesearch 'rust programming' --time week --sort popularity --max 10
+cargo run -- youtubeinfo 'https://www.youtube.com/watch?v=rQ_J9WH6CGk'
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 ```
@@ -77,6 +78,7 @@ cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 | `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
+| `youtubeinfo '<视频URL或ID>'` | 获取指定 YouTube 视频详情：字幕全文、URL、作者、时长、点赞/评论/订阅数，输出 `{ tab_id, video }` |
 | `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ trend[], top[], rising[] }` |
 | `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
 
@@ -139,6 +141,21 @@ cargo run -- youtubesearch 'rust programming' --time week --max 10   # 最多返
 
 筛选不是靠点击页面 UI，而是直接构造 YouTube 搜索 URL 的 `sp` 参数（今天 `EgIIAg==`、本周 `EgIIAw==`、本月 `EgIIBA==`、今年 `EgIIBQ==`；热门程度 `CAM=`；组合 token 实测自真实浏览器 2026 年的"过滤"面板）。**不依赖页面渲染**：导航返回的 HTML 里就内嵌了完整首屏数据（`ytInitialData`，约 20 条），配方直接解析它；不够 `--max` 时再取页面里的 InnerTube API key/context，用 continuation token 调 `/youtubei/v1/search` 续取（yt-dlp 同款数据源）。数据在 HTML 里就齐全，所以**标签页在后台/被全屏应用遮挡也照常拿满，不弹窗、不抢焦点、不用切过去**，实测 `--max 40` 约 3 秒返回。duration 直接取接口的 lengthText，不会缺失。若页面数据缺失（如验证墙/consent 页）会返回明确错误提示。
 
+### youtubeinfo
+
+获取指定 YouTube 视频的详情，返回 `{ tab_id, video }`，`video` 含 `url` / `title` / `author` / `author_url` / `duration`（`HH:MM:SS`）/ `duration_seconds` / `like_count` / `comment_count` / `subscriber_count`（均为解析后的整数，`万`/`亿`/`K`/`M` 等缩写会换算）/ 对应的 `*_text` 原始文本 / `captions[]`（每个字幕轨道含 `language_code` / `name` / `kind` / `text` 全文）：
+
+```sh
+cargo run -- youtubeinfo 'https://www.youtube.com/watch?v=rQ_J9WH6CGk'
+cargo run -- youtubeinfo 'rQ_J9WH6CGk'                  # 直接传 11 位视频 ID
+cargo run -- youtubeinfo 'https://youtu.be/rQ_J9WH6CGk' # youtu.be 短链 / shorts / embed / live 均可
+```
+
+- 输入支持 11 位视频 ID、`watch?v=`、`youtu.be/`、`/shorts/`、`/embed/`、`/live/` 链接
+- 点赞数取自页面点赞按钮（`LIKE` 的 `title`，如 `1.2万`）；评论数用 InnerTube `next` continuation 接口（yt-dlp 同款数据源，不依赖滚动评论区）；订阅数取自 `videoOwnerRenderer`
+- 字幕优先用页面内嵌的 `captionTracks`（timedtext json3）；若返回空（YouTube 对 `exp=xpe` 的轨道要求 PO token，页面内无法生成），按 yt-dlp 的做法改用 **android_vr 客户端**调 player API 取无 pot 要求的轨道
+- 同样不依赖页面渲染：数据来自 HTML 内嵌 JSON + InnerTube 接口，标签页在后台也能取到
+
 ### googletrends
 
 Google Trends 趋势查询，返回 `{ tab_id, trend[], top[], rising[] }`：
@@ -170,10 +187,11 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
 ├── transport.rs          # 连接 / 自动拉起 server / 请求 / 可重连 Bridge
 ├── target.rs             # 元素定位参数（css / text / xpath）
 └── recipes/              # 站点配方
-    ├── googlesearch.rs   # Google 搜索（选择器 + 编排）
-    ├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
-    ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
-    └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
+├── googlesearch.rs   # Google 搜索（选择器 + 编排）
+├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
+├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
+├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
+└── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
@@ -192,7 +210,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch` / `youtubesearch` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

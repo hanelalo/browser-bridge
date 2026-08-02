@@ -109,7 +109,7 @@ cd extension && pnpm install && pnpm build
 claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bridge-mcp
 ```
 
-配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`googletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
+配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`googletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
 
 ## 可用工具
 
@@ -178,6 +178,27 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 
 - `time` / `sort` 传入不支持的值会**直接报错**（不静默忽略），错误信息会列出合法取值。
 - 若页面数据缺失（如遇到验证墙 / consent 页）会返回明确错误提示。
+
+#### youtubeinfo
+
+获取指定 YouTube 视频的详情（字幕全文、URL、作者、时长、点赞/评论/订阅数）。直接解析视频页 HTML 内嵌的 `ytInitialPlayerResponse` / `ytInitialData`，评论数用 InnerTube `next` continuation 接口获取（不依赖滚动评论区）。**不依赖页面渲染与窗口可见性**，标签页在后台也能取到。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `url` | string | ✔ | — | 视频 URL 或 11 位视频 ID（`watch?v=` / `youtu.be` / `shorts` / `embed` / `live` 均可） |
+| `tab_id` | int | — | 当前激活页 | 目标标签页 |
+
+返回：`{ "tab_id": int, "video": { "url", "title", "author", "author_url", "duration", "duration_seconds", "like_count", "like_count_text", "comment_count", "comment_count_text", "subscriber_count", "subscriber_count_text", "captions": [...] } }`。各 `*_count` 为解析后的整数（`万`/`亿`/`K`/`M` 缩写会换算），`*_text` 为页面原始文本；`captions[]` 每项含 `language_code` / `name` / `kind` / `text`（字幕全文）/ `error`（单轨道失败原因，成功为 `null`）。
+
+字幕说明：优先用页面内嵌的 `captionTracks`（timedtext json3）；若返回空（YouTube 对 `exp=xpe` 的轨道要求 PO token，页面内无法生成），按 yt-dlp 的做法改用 **android_vr 客户端**调 player API 取无 pot 要求的轨道。视频无字幕时 `captions` 为空数组，不报错。
+
+示例：
+
+```json
+{ "url": "https://www.youtube.com/watch?v=rQ_J9WH6CGk" }
+```
 
 #### googletrends
 
