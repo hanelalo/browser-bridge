@@ -100,12 +100,44 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 `bridge-mcp` 把全部浏览器指令暴露为 MCP tools（stdio 传输），供 Claude / Codex / Cursor 等客户端直接调用。运行：
 
 ```sh
-cargo run -p bridge-mcp            # 或 ./target/release/bridge-mcp
+./target/release/bridge-mcp        # 或 cargo run -p bridge-mcp
 ```
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
 - 工具列表：`list_tabs` / `close_tab` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch`。
+
+#### 配置示例
+
+先构建一次 `./scripts/build.sh`，然后把 MCP 服务指向 `target/release/bridge-mcp`（绝对路径）。
+
+Claude Desktop（`claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "command": "/绝对路径/browser-bridge/target/release/bridge-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Cursor（`.cursor/mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "command": "/绝对路径/browser-bridge/target/release/bridge-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+前提：浏览器已加载扩展（`chrome://extensions` 加载 `extension/dist/chrome-mv3`）。MCP 首次调用会自动拉起 bridge-server，扩展会在几秒内自动重连，无需手动启动任何进程。
 
 ## 构建产物（发布）
 
