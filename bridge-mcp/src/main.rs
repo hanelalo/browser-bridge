@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bridge_core::recipes::googlesearch::googlesearch;
+use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
@@ -204,6 +205,17 @@ struct RedditsearchParams {
     query: String,
     #[serde(default)]
     tab_id: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct GoogletrendsParams {
+    query: String,
+    /// 时间范围（默认 today 1-m；如 today 3-m / today 12-m / today 5-y / all）
+    #[serde(default)]
+    date: Option<String>,
+    /// 地区（默认 Worldwide）
+    #[serde(default)]
+    geo: Option<String>,
 }
 
 // ---------- 工具辅助 ----------
@@ -491,6 +503,24 @@ impl BridgeMcp {
         let out = redditsearch(&mut bridge, &p.query, p.tab_id)
             .await
             .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "googletrends", description = "Google Trends 趋势查询，返回 { tab_id, trend[], top[], rising[] }")]
+    pub async fn googletrends_tool(
+        &self,
+        params: Parameters<GoogletrendsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = googletrends(
+            &mut bridge,
+            &p.query,
+            p.date.as_deref().unwrap_or("today 1-m"),
+            p.geo.as_deref().unwrap_or("Worldwide"),
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 }

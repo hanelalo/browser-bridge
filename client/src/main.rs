@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use bridge_core::recipes::googlesearch::googlesearch;
+use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
@@ -81,6 +82,17 @@ enum Cmd {
         /// 指定标签页 id（默认当前激活标签页）
         #[arg(long)]
         tab: Option<i32>,
+    },
+    /// 查询 Google Trends，返回趋势序列 + 热门/上升关键词
+    Googletrends {
+        /// 搜索关键词
+        query: String,
+        /// 时间范围（默认 today 1-m；如 today 3-m / today 12-m / today 5-y / all）
+        #[arg(long, default_value = "today 1-m")]
+        date: String,
+        /// 地区（默认 Worldwide）
+        #[arg(long, default_value = "Worldwide")]
+        geo: String,
     },
     /// 导航到指定 URL
     Navigate {
@@ -288,6 +300,23 @@ async fn main() {
                 }
             };
             match redditsearch(&mut bridge, &query, tab).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::Googletrends { query, date, geo } => {
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match googletrends(&mut bridge, &query, &date, &geo).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
