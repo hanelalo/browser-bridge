@@ -1,15 +1,11 @@
 //! Browser Bridge CLI client（控制端）。
 
-mod bridge;
-mod recipes;
-mod target;
-
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
-use bridge::{connect_bridge, request};
-use recipes::googlesearch::googlesearch;
-use target::{optional_target, Target};
+use bridge_core::recipes::googlesearch::googlesearch;
+use bridge_core::target;
+use bridge_core::transport::Bridge;
 
 #[derive(Parser)]
 #[command(
@@ -24,6 +20,26 @@ struct Cli {
 
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// 元素定位参数：css / text / xpath 三种方式，可指定第几个匹配。
+#[derive(Args)]
+struct Target {
+    /// 定位值：CSS selector / 可见文本 / XPath
+    #[arg(value_name = "TARGET", id = "target")]
+    value: String,
+    /// 定位方式：css | text | xpath
+    #[arg(long, default_value = "css")]
+    by: String,
+    /// 第几个匹配（从 0 开始，默认 0）
+    #[arg(long, id = "target_index", value_name = "INDEX")]
+    index: Option<usize>,
+}
+
+impl Target {
+    fn spec(&self) -> Value {
+        target::spec(&self.by, &self.value, self.index)
+    }
 }
 
 #[derive(Subcommand)]
@@ -232,9 +248,19 @@ async fn main() {
         Cmd::NewTab { url } => ("new_tab", json!({ "url": url })),
         Cmd::ActivateTab { tab } => ("activate_tab", json!({ "tab_id": tab })),
         Cmd::Googlesearch { query, tab } => {
-            if let Err(err) = googlesearch(&cli.server, &query, tab).await {
-                eprintln!("error: {err}");
-                std::process::exit(1);
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match googlesearch(&mut bridge, &query, tab).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
             }
             return;
         }
@@ -267,7 +293,7 @@ async fn main() {
             if wait_load {
                 params["wait_load"] = json!(true);
             }
-            if let Some(t) = optional_target(target.as_deref(), &by, index) {
+            if let Some(t) = target::optional_target(target.as_deref(), &by, index) {
                 params["target"] = t;
             }
             ("press_key", params)
@@ -291,7 +317,7 @@ async fn main() {
                 "smooth": smooth,
                 "tab_id": tab,
             });
-            if let Some(t) = optional_target(target.as_deref(), &by, index) {
+            if let Some(t) = target::optional_target(target.as_deref(), &by, index) {
                 params["target"] = t;
             }
             ("scroll", params)
@@ -389,8 +415,8 @@ async fn main() {
 
 /// 发送单个通用指令并打印结果。
 async fn run(server: &str, method: &str, params: Value) -> Result<(), String> {
-    let mut ws = connect_bridge(server).await?;
-    let result = request(&mut ws, "c1", method, params).await?;
+    let mut bridge = Bridge::connect(server).await?;
+    let result = bridge.request("c1", method, params).await?;
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     Ok(())
 }

@@ -1,8 +1,10 @@
-//! 与 bridge server 的传输层：连接、请求-响应、URL 编码。
+//! 与 bridge server 的传输层：连接、自动拉起、请求-响应、可重连客户端。
 
-use std::time::Duration;
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -16,7 +18,38 @@ pub const AUTO_SPAWN_IDLE_TIMEOUT: &str = "120";
 
 pub type BridgeStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// 连接 server 并完成 hello 握手。
+/// 可重连的 bridge 客户端：长连接 + 请求，断线自动重连（含自动拉起）后重试一次。
+pub struct Bridge {
+    server: String,
+    ws: BridgeStream,
+}
+
+impl Bridge {
+    pub async fn connect(server: &str) -> Result<Self, String> {
+        Ok(Self {
+            server: server.to_string(),
+            ws: connect_bridge(server).await?,
+        })
+    }
+
+    /// 发送一次请求；连接断开时自动重连（含自动拉起 server）后重试一次。
+    pub async fn request(
+        &mut self,
+        id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        match request(&mut self.ws, id, method, params.clone()).await {
+            Ok(value) => Ok(value),
+            Err(_) => {
+                self.ws = connect_bridge(&self.server).await?;
+                request(&mut self.ws, id, method, params).await
+            }
+        }
+    }
+}
+
+/// 连接 server 并完成 hello 握手；连接失败时自动拉起 bridge-server。
 pub async fn connect_bridge(server: &str) -> Result<BridgeStream, String> {
     match connect_async(server).await {
         Ok((ws, _)) => finish_hello(ws).await,
@@ -67,7 +100,10 @@ async fn finish_hello(mut ws: BridgeStream) -> Result<BridgeStream, String> {
 fn spawn_bridge_server(server: &str) -> Result<(), String> {
     let bin = server_binary_path()?;
     let port = server_port(server);
-    Command::new(&bin)
+    let mut cmd = Command::new(&bin);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
         .env("BRIDGE_PORT", &port)
         .env("BRIDGE_IDLE_TIMEOUT", AUTO_SPAWN_IDLE_TIMEOUT)
         .stdout(Stdio::null())

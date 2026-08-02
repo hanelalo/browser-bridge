@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 
-use crate::bridge::{connect_bridge, request, urlencode};
+use crate::transport::{urlencode, Bridge};
 
 // 提取用容器：#rso 的直接子 div，每个即一条搜索结果
 const GOOGLE_RESULT_ITEM: &str = "#rso > div";
@@ -15,30 +15,34 @@ const GOOGLE_RESULT_DESC: &str = "div[data-sncf='1'] > div";
 const GOOGLE_RESULT_TARGET: &str = "#rso a:has(h3)";
 
 /// Google 搜索：导航到搜索结果页，提取 title / description / url。
-/// 输出 `{ "tab_id": ..., "results": [...] }`，tab_id 供后续指令在同一标签页上链式操作。
-pub async fn googlesearch(server: &str, query: &str, tab: Option<i32>) -> Result<(), String> {
-    let mut ws = connect_bridge(server).await?;
-
+/// 返回 `{ "tab_id": ..., "results": [...] }`，tab_id 供后续指令在同一标签页上链式操作。
+pub async fn googlesearch(
+    bridge: &mut Bridge,
+    query: &str,
+    tab: Option<i32>,
+) -> Result<Value, String> {
     let url = format!("https://www.google.com/search?q={}", urlencode(query));
-    let nav = request(&mut ws, "gs1", "navigate", json!({ "url": url, "tab_id": tab })).await?;
+    let nav = bridge
+        .request("gs1", "navigate", json!({ "url": url, "tab_id": tab }))
+        .await?;
     let tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
 
-    let scraped = request(
-        &mut ws,
-        "gs2",
-        "scrape",
-        json!({
-            "item": GOOGLE_RESULT_ITEM,
-            "fields": {
-                "title": GOOGLE_RESULT_TITLE,
-                "url": GOOGLE_RESULT_URL,
-                "description": GOOGLE_RESULT_DESC,
-            },
-            "timeout": 10_000,
-            "tab_id": tab,
-        }),
-    )
-    .await?;
+    let scraped = bridge
+        .request(
+            "gs2",
+            "scrape",
+            json!({
+                "item": GOOGLE_RESULT_ITEM,
+                "fields": {
+                    "title": GOOGLE_RESULT_TITLE,
+                    "url": GOOGLE_RESULT_URL,
+                    "description": GOOGLE_RESULT_DESC,
+                },
+                "timeout": 10_000,
+                "tab_id": tab,
+            }),
+        )
+        .await?;
 
     let items = scraped
         .get("items")
@@ -71,10 +75,8 @@ pub async fn googlesearch(server: &str, query: &str, tab: Option<i32>) -> Result
         })
         .collect();
 
-    let out = json!({
+    Ok(json!({
         "tab_id": tab_id,
         "results": results,
-    });
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
-    Ok(())
+    }))
 }

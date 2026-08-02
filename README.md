@@ -84,15 +84,28 @@ cargo run -- googlesearch 'Haze Seas'
 ### client 结构
 
 ```text
-client/src/
-├── main.rs               # CLI 子命令 + 分发（通用壳）
-├── bridge.rs             # 传输层：连接 / 请求 / URL 编码
+bridge-core/              # 共享库（CLI 与 MCP 复用）
+├── transport.rs          # 连接 / 自动拉起 server / 请求 / 可重连 Bridge
 ├── target.rs             # 元素定位参数（css / text / xpath）
 └── recipes/              # 站点配方
     └── googlesearch.rs   # Google 搜索（选择器 + 编排）
+client/                   # CLI（薄壳：子命令 + 分发）
+bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
 
 加新站点搜索只需在 `recipes/` 里加一个文件，并在 `main.rs` 注册子命令，协议与扩展无需改动。
+
+### MCP
+
+`bridge-mcp` 把全部浏览器指令暴露为 MCP tools（stdio 传输），供 Claude / Codex / Cursor 等客户端直接调用。运行：
+
+```sh
+cargo run -p bridge-mcp            # 或 ./target/release/bridge-mcp
+```
+
+- 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
+- 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
+- 工具列表：`list_tabs` / `close_tab` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch`。
 
 ## 构建产物（发布）
 

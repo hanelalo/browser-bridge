@@ -1,12 +1,10 @@
 [package]
-name = "bridge-client"
+name = "bridge-core"
 version = "0.1.0"
 edition = "2021"
-description = "Browser Bridge CLI client"
+description = "Browser Bridge 客户端共享库：传输层、元素定位、站点配方"
 
 [dependencies]
-bridge-core = { path = "../bridge-core" }
-clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
