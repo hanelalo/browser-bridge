@@ -80,6 +80,60 @@ result：
 }
 ```
 
+### close_tab
+
+关闭标签页（默认当前激活标签页）。
+
+params：
+
+```json
+{ "tab_id": 7 }
+```
+
+`tab_id` 可选。
+
+result：
+
+```json
+{ "closed": true, "tab_id": 7 }
+```
+
+### new_tab
+
+新建标签页，可指定打开 URL。
+
+params：
+
+```json
+{ "url": "https://example.com" }
+```
+
+`url` 可选，省略为空白页。
+
+result：
+
+```json
+{ "tab_id": 8, "url": "https://example.com", "title": "Example", "active": true }
+```
+
+### activate_tab
+
+切换到指定标签页并聚焦所在窗口（默认当前激活标签页）。
+
+params：
+
+```json
+{ "tab_id": 7 }
+```
+
+`tab_id` 可选。
+
+result：
+
+```json
+{ "tab_id": 7, "url": "https://example.com", "title": "Example", "active": true }
+```
+
 ### navigate
 
 导航标签页（默认当前激活标签页），并等待页面加载完成。

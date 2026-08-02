@@ -30,6 +30,23 @@ struct Cli {
 enum Cmd {
     /// 列出所有标签页
     ListTabs,
+    /// 关闭标签页（默认当前激活标签页）
+    CloseTab {
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
+    /// 新建标签页（可选打开 URL）
+    NewTab {
+        /// 新标签页打开的 URL（省略则为空白页）
+        url: Option<String>,
+    },
+    /// 切换到指定标签页并聚焦所在窗口
+    ActivateTab {
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
     /// 搜索 Google 并返回结构化结果（JSON 数组：title / description / url）
     Googlesearch {
         /// 搜索关键词
@@ -211,6 +228,9 @@ async fn main() {
     let cli = Cli::parse();
     let (method, params) = match cli.cmd {
         Cmd::ListTabs => ("list_tabs", json!({})),
+        Cmd::CloseTab { tab } => ("close_tab", json!({ "tab_id": tab })),
+        Cmd::NewTab { url } => ("new_tab", json!({ "url": url })),
+        Cmd::ActivateTab { tab } => ("activate_tab", json!({ "tab_id": tab })),
         Cmd::Googlesearch { query, tab } => {
             if let Err(err) = googlesearch(&cli.server, &query, tab).await {
                 eprintln!("error: {err}");

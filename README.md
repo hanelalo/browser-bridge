@@ -37,6 +37,10 @@ pnpm dev             # 会自动打开 Chrome 并加载开发版插件
 ```sh
 cd client
 cargo run -- list-tabs
+cargo run -- new-tab https://example.com                # 新建标签页
+cargo run -- activate-tab --tab 7                        # 切换到指定标签页
+cargo run -- close-tab                                   # 关闭当前激活标签页
+cargo run -- close-tab --tab 7                           # 关闭指定标签页
 cargo run -- navigate https://example.com
 cargo run -- click '#submit'                         # CSS 选择器
 cargo run -- click '登录' --by text                  # 按文本定位

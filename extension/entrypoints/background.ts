@@ -108,6 +108,12 @@ async function execute(method: string, params: Record<string, unknown>): Promise
   switch (method) {
     case 'list_tabs':
       return listTabs();
+    case 'close_tab':
+      return closeTab(params);
+    case 'new_tab':
+      return newTab(params);
+    case 'activate_tab':
+      return activateTab(params);
     case 'navigate':
       return navigate(params);
     case 'click':
@@ -409,6 +415,38 @@ async function getPageContent(params: Record<string, unknown>): Promise<unknown>
     }),
   });
   return { ...(result?.result ?? {}), tab_id: tab.id };
+}
+
+/** 关闭标签页（默认当前激活标签页）。 */
+async function closeTab(params: Record<string, unknown>): Promise<unknown> {
+  const tab = await resolveTab(params.tab_id as number | undefined);
+  if (tab.id == null) throw new Error('tab has no id');
+  await chrome.tabs.remove(tab.id);
+  return { closed: true, tab_id: tab.id };
+}
+
+/** 新建标签页（可指定 URL）。 */
+async function newTab(params: Record<string, unknown>): Promise<unknown> {
+  const url = typeof params.url === 'string' && params.url ? params.url : undefined;
+  const tab = await chrome.tabs.create({ url });
+  return { tab_id: tab.id, url: tab.url ?? null, title: tab.title ?? null, active: tab.active };
+}
+
+/** 切换到指定标签页并聚焦所在窗口（默认当前激活标签页）。 */
+async function activateTab(params: Record<string, unknown>): Promise<unknown> {
+  const tab = await resolveTab(params.tab_id as number | undefined);
+  if (tab.id == null) throw new Error('tab has no id');
+  await chrome.tabs.update(tab.id, { active: true });
+  if (tab.windowId != null) {
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
+  const updated = await chrome.tabs.get(tab.id);
+  return {
+    tab_id: updated.id,
+    url: updated.url ?? null,
+    title: updated.title ?? null,
+    active: updated.active,
+  };
 }
 
 /**
