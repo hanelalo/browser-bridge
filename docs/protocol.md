@@ -98,9 +98,19 @@ result：
 { "closed": true, "tab_id": 7 }
 ```
 
+### close_auto_tabs
+
+关闭 bridge 自动打开（`new_tab` 创建）的全部标签页，不碰手动开的标签页。无参数。
+
+result：
+
+```json
+{ "closed": [7, 9] }
+```
+
 ### new_tab
 
-新建标签页，可指定打开 URL。
+新建标签页，可指定打开 URL。该标签页会被记录为"自动打开的标签页"，可用 `close_auto_tabs` 清理。
 
 params：
 
@@ -159,10 +169,11 @@ result：
 params：
 
 ```json
-{ "target": { "by": "css", "value": "#submit" }, "tab_id": 7, "timeout": 5000 }
+{ "target": { "by": "css", "value": "#submit" }, "tab_id": 7, "timeout": 5000, "new_tab": false }
 ```
 
 `timeout` 可选，默认 5000。
+`new_tab` 可选，默认 `false`：点击锚点链接时默认在当前标签页打开（覆盖 `target="_blank"`，避免流程开新标签页堆积）；设为 `true` 则保留站点默认的新标签页行为。
 
 result：
 

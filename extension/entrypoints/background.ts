@@ -10,6 +10,30 @@ let pingTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectDelayMs = 500;
 let status: 'connecting' | 'connected' | 'disconnected' = 'disconnected';
 
+// bridge 自动打开的标签页（new_tab），用于 close_auto_tabs 一键清理。
+// 存 chrome.storage.session，service worker 重启也不丢；浏览器重启后自然失效。
+let autoTabs: Set<number> = new Set();
+
+async function saveAutoTabs(): Promise<void> {
+  try {
+    await chrome.storage.session.set({ autoTabs: Array.from(autoTabs) });
+  } catch {
+    // session 存储不可用时退回仅内存记录
+  }
+}
+
+void (async () => {
+  try {
+    const got = await chrome.storage.session.get('autoTabs');
+    if (Array.isArray(got.autoTabs)) autoTabs = new Set(got.autoTabs as number[]);
+  } catch {
+    // ignore
+  }
+  chrome.tabs.onRemoved.addListener((id) => {
+    if (autoTabs.delete(id)) void saveAutoTabs();
+  });
+})();
+
 function setStatus(next: typeof status): void {
   status = next;
   // 通知 popup（没有打开时静默失败）
@@ -114,6 +138,8 @@ async function execute(method: string, params: Record<string, unknown>): Promise
       return newTab(params);
     case 'activate_tab':
       return activateTab(params);
+    case 'close_auto_tabs':
+      return closeAutoTabs();
     case 'navigate':
       return navigate(params);
     case 'click':
@@ -428,10 +454,29 @@ async function closeTab(params: Record<string, unknown>): Promise<unknown> {
   return { closed: true, tab_id: tab.id };
 }
 
+/** 关闭 bridge 自动打开（new_tab）的全部标签页，不碰手动开的。 */
+async function closeAutoTabs(): Promise<unknown> {
+  const ids = Array.from(autoTabs);
+  const existing = (
+    await Promise.all(ids.map((id) => chrome.tabs.get(id).catch(() => null)))
+  ).filter((t): t is chrome.tabs.Tab => t !== null);
+  const closed = existing.map((t) => t.id ?? 0).filter((id) => id > 0);
+  if (closed.length > 0) {
+    await chrome.tabs.remove(closed);
+  }
+  autoTabs.clear();
+  void saveAutoTabs();
+  return { closed };
+}
+
 /** 新建标签页（可指定 URL）。 */
 async function newTab(params: Record<string, unknown>): Promise<unknown> {
   const url = typeof params.url === 'string' && params.url ? params.url : undefined;
   const tab = await chrome.tabs.create({ url });
+  if (tab.id != null) {
+    autoTabs.add(tab.id);
+    void saveAutoTabs();
+  }
   return { tab_id: tab.id, url: tab.url ?? null, title: tab.title ?? null, active: tab.active };
 }
 
@@ -531,13 +576,20 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
         visible: Boolean(htmlEl.offsetWidth || htmlEl.offsetHeight),
       };
     };
-  const clickElement = (el: Element): Record<string, unknown> => {
+  const clickElement = (el: Element, newTab = false): Record<string, unknown> => {
     const info = describe(el);
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
     if (el instanceof HTMLAnchorElement) {
-      // 锚点：只走 el.click() 的默认激活，避免合成 click 先触发页面 handler（可能再开一个 tab）
-      el.click();
+      // 锚点：只走 el.click() 的默认激活，避免合成 click 先触发页面 handler；
+      // 默认覆盖 target=_blank 在当前标签页打开，防止流程开新 tab 堆积，new_tab=true 时保留原行为
+      if (!newTab && el.target === '_blank') {
+        el.target = '_self';
+        el.click();
+        el.target = '_blank';
+      } else {
+        el.click();
+      }
     } else {
       el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       if (el instanceof HTMLElement) el.click();
@@ -643,7 +695,7 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
         }
         const el = document.elementFromPoint(x, y);
         if (!el) throw new Error(`no element at (${x}, ${y})`);
-        return { clicked: clickElement(el), x, y };
+        return { clicked: clickElement(el, params.new_tab === true), x, y };
       }
 
       if (op === 'scroll') {
@@ -754,7 +806,7 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
 
       switch (op) {
         case 'click':
-          return { clicked: clickElement(el) };
+          return { clicked: clickElement(el, params.new_tab === true) };
         case 'set_value': {
           const value = String(params.value ?? '');
           if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {

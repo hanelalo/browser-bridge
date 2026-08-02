@@ -53,6 +53,8 @@ enum Cmd {
         #[arg(long)]
         tab: Option<i32>,
     },
+    /// 关闭 bridge 自动打开的全部标签页（不碰手动开的）
+    CloseAutoTabs,
     /// 新建标签页（可选打开 URL）
     NewTab {
         /// 新标签页打开的 URL（省略则为空白页）
@@ -91,6 +93,9 @@ enum Cmd {
     Click {
         #[command(flatten)]
         target: Target,
+        /// 锚点链接在新标签页打开（默认当前标签页打开，避免流程开 tab 堆积）
+        #[arg(long)]
+        new_tab: bool,
         /// 等待元素出现的最长时间（毫秒，默认 5000）
         #[arg(long)]
         timeout: Option<u64>,
@@ -254,6 +259,7 @@ async fn main() {
     let (method, params) = match cli.cmd {
         Cmd::ListTabs => ("list_tabs", json!({})),
         Cmd::CloseTab { tab } => ("close_tab", json!({ "tab_id": tab })),
+        Cmd::CloseAutoTabs => ("close_auto_tabs", json!({})),
         Cmd::NewTab { url } => ("new_tab", json!({ "url": url })),
         Cmd::ActivateTab { tab } => ("activate_tab", json!({ "tab_id": tab })),
         Cmd::Googlesearch { query, tab } => {
@@ -293,10 +299,14 @@ async fn main() {
         Cmd::Navigate { url, tab } => ("navigate", json!({ "url": url, "tab_id": tab })),
         Cmd::Click {
             target,
+            new_tab,
             timeout,
             tab,
         } => {
             let mut params = json!({ "target": target.spec(), "tab_id": tab });
+            if new_tab {
+                params["new_tab"] = json!(true);
+            }
             if let Some(t) = timeout {
                 params["timeout"] = json!(t);
             }

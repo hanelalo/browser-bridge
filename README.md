@@ -55,8 +55,9 @@ cargo run -- redditsearch 'rust programming'
 | `new-tab [url]` | 新建标签页（可指定 URL） |
 | `activate-tab --tab <id>` | 切换标签页并聚焦窗口 |
 | `close-tab [--tab <id>]` | 关闭标签页（默认当前激活页） |
+| `close-auto-tabs` | 关闭 bridge 自动打开的全部标签页（不碰手动开的） |
 | `navigate <url>` | 导航并等待页面加载完成 |
-| `click <target>` | 点击匹配定位的元素 |
+| `click <target> [--new-tab]` | 点击匹配定位的元素（锚点默认当前标签页打开） |
 | `click-at <x> <y>` | 按坐标点击 |
 | `press-key <key>` | 模拟按键（支持修饰键、`--wait-load`） |
 | `scroll --dx --dy` | 滚动窗口或指定容器 |
@@ -72,6 +73,8 @@ cargo run -- redditsearch 'rust programming'
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 
 多数指令支持 `--tab <id>` 指定标签页，默认操作当前激活页。
+
+**标签页管理**：`click` 点击锚点链接默认在当前标签页打开（自动覆盖 `target="_blank"`），需要新开时用 `--new-tab`；`new-tab` 打开的标签页会被扩展记录，流程结束后可用 `close-auto-tabs` 一键清理，不会误关你手动打开的标签页。
 
 ### googlesearch
 
@@ -118,7 +121,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
-- 工具列表：`list_tabs` / `close_tab` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch`。
 
 #### 配置示例
 

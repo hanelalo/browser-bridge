@@ -62,6 +62,9 @@ struct ClickParams {
     /// 等待元素出现的最长时间（毫秒，默认 5000）
     #[serde(default)]
     timeout: Option<u64>,
+    /// 锚点链接在新标签页打开（默认当前标签页打开，避免流程开 tab 堆积）
+    #[serde(default)]
+    new_tab: Option<bool>,
     #[serde(default)]
     tab_id: Option<i32>,
 }
@@ -253,6 +256,11 @@ impl BridgeMcp {
         call(&self.bridge, "ct", "close_tab", json!({ "tab_id": params.0.tab_id })).await
     }
 
+    #[tool(name = "close_auto_tabs", description = "关闭 bridge 自动打开的全部标签页（不碰手动开的）")]
+    pub async fn close_auto_tabs(&self) -> Result<CallToolResult, ErrorData> {
+        call(&self.bridge, "cat", "close_auto_tabs", json!({})).await
+    }
+
     #[tool(name = "new_tab", description = "新建标签页（可选打开 URL）")]
     pub async fn new_tab(
         &self,
@@ -287,6 +295,9 @@ impl BridgeMcp {
         let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id);
         if let Some(t) = p.timeout {
             v["timeout"] = json!(t);
+        }
+        if p.new_tab.unwrap_or(false) {
+            v["new_tab"] = json!(true);
         }
         call(&self.bridge, "clk", "click", v).await
     }
