@@ -7,7 +7,7 @@ const SERVER_URL =
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
-let reconnectDelayMs = 1000;
+let reconnectDelayMs = 500;
 let status: 'connecting' | 'connected' | 'disconnected' = 'disconnected';
 
 function setStatus(next: typeof status): void {
@@ -51,7 +51,7 @@ function scheduleReconnect(): void {
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000);
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 5_000);
     connect();
   }, reconnectDelayMs);
 }

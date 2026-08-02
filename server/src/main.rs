@@ -124,54 +124,81 @@ struct Conn {
 /// id -> (发起请求的 client 连接, 取消超时任务的信号)
 type Pending = HashMap<String, (u64, oneshot::Sender<()>)>;
 
-async fn hub_loop(mut rx: mpsc::UnboundedReceiver<HubMsg>, hub_tx: mpsc::UnboundedSender<HubMsg>) {
+async fn hub_loop(
+    mut rx: mpsc::UnboundedReceiver<HubMsg>,
+    hub_tx: mpsc::UnboundedSender<HubMsg>,
+    idle_timeout: Duration,
+) {
     let mut conns: HashMap<u64, Conn> = HashMap::new();
     let mut extension_id: Option<u64> = None;
     let mut pending: Pending = HashMap::new();
+    let mut last_activity = tokio::time::Instant::now();
+    // 每秒检查一次空闲状态；丢弃 interval 的首次立即触发
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    ticker.tick().await;
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            HubMsg::Register {
-                conn_id,
-                role,
-                name,
-                tx,
-            } => {
-                if role == Role::Extension {
-                    if let Some(old) = extension_id.replace(conn_id) {
-                        // 新 extension 顶掉旧的：清掉所有未完成请求
-                        conns.remove(&old);
-                        pending.clear();
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                let Some(event) = event else { break };
+                last_activity = tokio::time::Instant::now();
+                match event {
+                    HubMsg::Register {
+                        conn_id,
+                        role,
+                        name,
+                        tx,
+                    } => {
+                        if role == Role::Extension {
+                            if let Some(old) = extension_id.replace(conn_id) {
+                                // 新 extension 顶掉旧的：清掉所有未完成请求
+                                conns.remove(&old);
+                                pending.clear();
+                            }
+                        }
+                        eprintln!(
+                            "[hub] connection #{conn_id} registered as {:?} \"{name}\"",
+                            role
+                        );
+                        conns.insert(conn_id, Conn { role, tx });
+                    }
+                    HubMsg::Unregister { conn_id } => {
+                        if extension_id == Some(conn_id) {
+                            extension_id = None;
+                            pending.clear();
+                        }
+                        if conns.remove(&conn_id).is_some() {
+                            eprintln!("[hub] connection #{conn_id} disconnected");
+                        }
+                    }
+                    HubMsg::Forward { conn_id, msg } => {
+                        match conns.get(&conn_id).map(|c| c.role.clone()) {
+                            Some(Role::Client) => {
+                                handle_client(&hub_tx, &conns, extension_id, &mut pending, conn_id, msg)
+                            }
+                            Some(Role::Extension) => {
+                                handle_extension(&conns, &mut pending, conn_id, msg)
+                            }
+                            None => {}
+                        }
+                    }
+                    HubMsg::TimedOut { id } => {
+                        if let Some((client_id, _)) = pending.remove(&id) {
+                            send(
+                                conns.get(&client_id),
+                                WireMessage::err(&id, "timeout: extension did not respond in 30s"),
+                            );
+                        }
                     }
                 }
-                eprintln!(
-                    "[hub] connection #{conn_id} registered as {:?} \"{name}\"",
-                    role
-                );
-                conns.insert(conn_id, Conn { role, tx });
             }
-            HubMsg::Unregister { conn_id } => {
-                if extension_id == Some(conn_id) {
-                    extension_id = None;
-                    pending.clear();
-                }
-                if conns.remove(&conn_id).is_some() {
-                    eprintln!("[hub] connection #{conn_id} disconnected");
-                }
-            }
-            HubMsg::Forward { conn_id, msg } => match conns.get(&conn_id).map(|c| c.role.clone()) {
-                Some(Role::Client) => {
-                    handle_client(&hub_tx, &conns, extension_id, &mut pending, conn_id, msg)
-                }
-                Some(Role::Extension) => handle_extension(&conns, &mut pending, conn_id, msg),
-                None => {}
-            },
-            HubMsg::TimedOut { id } => {
-                if let Some((client_id, _)) = pending.remove(&id) {
-                    send(
-                        conns.get(&client_id),
-                        WireMessage::err(&id, "timeout: extension did not respond in 30s"),
+            _ = ticker.tick() => {
+                if !idle_timeout.is_zero() && last_activity.elapsed() >= idle_timeout {
+                    eprintln!(
+                        "[hub] idle for {}s, exiting",
+                        idle_timeout.as_secs()
                     );
+                    std::process::exit(0);
                 }
             }
         }
@@ -360,12 +387,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_PORT);
+    let idle_timeout = std::env::var("BRIDGE_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::ZERO);
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr).await?;
-    eprintln!("browser-bridge server listening on ws://{addr}");
+    let idle_note = if idle_timeout.is_zero() {
+        String::new()
+    } else {
+        format!("（空闲 {}s 自动退出）", idle_timeout.as_secs())
+    };
+    eprintln!("browser-bridge server listening on ws://{addr} {idle_note}");
 
     let (hub_tx, hub_rx) = mpsc::unbounded_channel();
-    tokio::spawn(hub_loop(hub_rx, hub_tx.clone()));
+    tokio::spawn(hub_loop(hub_rx, hub_tx.clone(), idle_timeout));
 
     let mut next_id: u64 = 0;
     loop {
@@ -415,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn routes_request_to_extension_and_response_back_to_client() {
         let (hub_tx, hub_rx) = mpsc::unbounded_channel();
-        tokio::spawn(hub_loop(hub_rx, hub_tx.clone()));
+        tokio::spawn(hub_loop(hub_rx, hub_tx.clone(), Duration::ZERO));
 
         let (ext_tx, mut ext_rx) = mpsc::unbounded_channel();
         hub_tx
@@ -477,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn errors_when_no_extension_connected() {
         let (hub_tx, hub_rx) = mpsc::unbounded_channel();
-        tokio::spawn(hub_loop(hub_rx, hub_tx.clone()));
+        tokio::spawn(hub_loop(hub_rx, hub_tx.clone(), Duration::ZERO));
 
         let (cli_tx, mut cli_rx) = mpsc::unbounded_channel();
         hub_tx

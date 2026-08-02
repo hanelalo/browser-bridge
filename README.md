@@ -34,6 +34,8 @@ pnpm dev             # 会自动打开 Chrome 并加载开发版插件
 
 ### 3. 使用 client
 
+client 连接失败时会**自动拉起 bridge-server**（需要已构建的二进制，可用 `BRIDGE_SERVER_BIN` 指定路径），自动拉起的 server 空闲 120 秒自动退出；插件断线后按 500ms→5s 退避自动重连。
+
 ```sh
 cd client
 cargo run -- list-tabs
@@ -143,8 +145,10 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 | 项 | 默认 | 说明 |
 |----|------|------|
 | server 端口 | 9225 | 环境变量 `BRIDGE_PORT` |
+| server 空闲退出 | 0（不退出） | 环境变量 `BRIDGE_IDLE_TIMEOUT`（秒）；客户端自动拉起时默认 120 |
 | 插件连接地址 | `ws://127.0.0.1:9225` | 构建时 `WXT_PUBLIC_BRIDGE_URL=ws://... pnpm build` |
 | client 服务地址 | `ws://127.0.0.1:9225` | `--server` 或环境变量 `BRIDGE_SERVER` |
+| client 自动拉起 | 已构建的 `bridge-server` | `BRIDGE_SERVER_BIN` 指定路径，否则按同目录 / target / PATH 查找 |
 | Chrome 版本 | 120+ | `run_script` 需要 `chrome.userScripts`（135+ 体验最佳） |
 
 ## 安全说明

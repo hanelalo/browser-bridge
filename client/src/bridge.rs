@@ -1,6 +1,8 @@
 //! 与 bridge server 的传输层：连接、请求-响应、URL 编码。
 
 use std::time::Duration;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -9,15 +11,47 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
+/// 自动拉起 server 时的空闲退出时间（秒）
+pub const AUTO_SPAWN_IDLE_TIMEOUT: &str = "120";
 
 pub type BridgeStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// 连接 server 并完成 hello 握手。
 pub async fn connect_bridge(server: &str) -> Result<BridgeStream, String> {
-    let (mut ws, _) = connect_async(server)
-        .await
-        .map_err(|e| format!("无法连接 {server}（server 是否在运行？）: {e}"))?;
+    match connect_async(server).await {
+        Ok((ws, _)) => finish_hello(ws).await,
+        Err(first_err) => {
+            // server 未运行：自动拉起一个，并等它就绪
+            match spawn_bridge_server(server) {
+                Ok(_) => {
+                    eprintln!(
+                        "已自动启动 bridge-server（空闲 {AUTO_SPAWN_IDLE_TIMEOUT}s 自动退出）"
+                    );
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                    loop {
+                        match connect_async(server).await {
+                            Ok((ws, _)) => return finish_hello(ws).await,
+                            Err(e) => {
+                                if tokio::time::Instant::now() >= deadline {
+                                    return Err(format!(
+                                        "自动启动 bridge-server 后仍无法连接 {server}: {e}"
+                                    ));
+                                }
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                            }
+                        }
+                    }
+                }
+                Err(spawn_err) => Err(format!(
+                    "无法连接 {server}（server 是否在运行？）: {first_err}；自动启动失败: {spawn_err}"
+                )),
+            }
+        }
+    }
+}
 
+/// 完成 hello 握手。
+async fn finish_hello(mut ws: BridgeStream) -> Result<BridgeStream, String> {
     ws.send(Message::Text(
         json!({ "type": "hello", "role": "client", "name": "bridge-client" })
             .to_string()
@@ -26,6 +60,56 @@ pub async fn connect_bridge(server: &str) -> Result<BridgeStream, String> {
     .await
     .map_err(|e| e.to_string())?;
     Ok(ws)
+}
+
+/// 自动拉起 bridge-server（与 client 同端口）。定位顺序：
+/// 1. `BRIDGE_SERVER_BIN` 显式指定；2. 与 client 同目录；3. target/release|debug；4. PATH。
+fn spawn_bridge_server(server: &str) -> Result<(), String> {
+    let bin = server_binary_path()?;
+    let port = server_port(server);
+    Command::new(&bin)
+        .env("BRIDGE_PORT", &port)
+        .env("BRIDGE_IDLE_TIMEOUT", AUTO_SPAWN_IDLE_TIMEOUT)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("启动 {bin:?} 失败: {e}"))
+}
+
+fn server_binary_path() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("BRIDGE_SERVER_BIN") {
+        let p = PathBuf::from(p);
+        if p.exists() {
+            return Ok(p);
+        }
+        return Err(format!("BRIDGE_SERVER_BIN 指向的文件不存在: {}", p.display()));
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("bridge-server"));
+        }
+    }
+    candidates.push(PathBuf::from("target/release/bridge-server"));
+    candidates.push(PathBuf::from("target/debug/bridge-server"));
+    for c in &candidates {
+        if c.exists() {
+            return Ok(c.clone());
+        }
+    }
+    // 兜底：交给 PATH 解析
+    Ok(PathBuf::from("bridge-server"))
+}
+
+/// 从 ws://host:port 中取出端口（自动拉起 server 时使用同一端口）。
+fn server_port(server: &str) -> String {
+    server
+        .rsplit(':')
+        .next()
+        .unwrap_or("9225")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// 在已有连接上发送一次请求并等待对应 id 的响应。
