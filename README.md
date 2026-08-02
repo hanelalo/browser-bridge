@@ -2,15 +2,17 @@
 
 通过 WebSocket 把本地工具和真实浏览器连接起来的桥，不需要 CDP。
 
-扩展安装在浏览器里，作为"手"；server 是本地的 WebSocket 枢纽；client 是发指令的入口（当前为 Rust CLI，后续可加 TS / Python client）。
+扩展安装在浏览器里，作为"手"；server 是本地的 WebSocket 枢纽；client 是发指令的入口（Rust CLI），也可通过 bridge-mcp 暴露给 Claude / Cursor 等 agent。
 
-## 三个子项目
+## 项目结构
 
 | 目录 | 技术 | 职责 |
 |------|------|------|
 | `extension/` | Vue 3 + TypeScript（WXT / Manifest V3） | 安装在浏览器里，执行指令 |
 | `server/` | Rust（tokio + tokio-tungstenite） | WebSocket 枢纽，路由指令与响应 |
 | `client/` | Rust CLI（clap） | 发指令、打印结果 |
+| `bridge-core/` | Rust 共享库 | 传输层（连接/自动拉起/重连）、元素定位、站点配方 |
+| `bridge-mcp/` | Rust（rmcp，MCP server） | stdio 暴露全部指令为 MCP tools，供 Claude / Codex / Cursor 调用 |
 
 ## 快速开始
 
@@ -149,7 +151,7 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
 └── recipes/              # 站点配方
     ├── googlesearch.rs   # Google 搜索（选择器 + 编排）
     ├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
-    └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析）
+    └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
@@ -159,6 +161,8 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ### MCP
 
 `bridge-mcp` 把全部浏览器指令暴露为 MCP tools（stdio 传输），供 Claude / Codex / Cursor 等客户端直接调用。运行：
+
+> 从零构建、加载扩展、配置各客户端（Claude Desktop / Cursor / Claude Code）的完整步骤见 [MCP.md](./MCP.md)。
 
 ```sh
 ./target/release/bridge-mcp        # 或 cargo run -p bridge-mcp
@@ -214,6 +218,7 @@ Cursor（`.cursor/mcp.json`）：
 |------|------|------|
 | `bridge-server` | `target/release/bridge-server` | 常驻 WebSocket 枢纽，直接运行 |
 | `bridge-client` | `target/release/bridge-client` | 发指令的 CLI，直接运行 |
+| `bridge-mcp` | `target/release/bridge-mcp` | MCP server，配给 Claude Desktop / Cursor 等 |
 | 扩展 | `extension/dist/chrome-mv3` | `chrome://extensions` 加载已解压目录 |
 
 ### 元素定位
