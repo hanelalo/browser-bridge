@@ -123,7 +123,7 @@ cargo run -- querydomains 'browserbridge'
 cargo run -- querydomains 'browserbridge' --tlds 'dev,cloud,blog'   # 自定义 TLD（默认 14 个，最多 20 个）
 ```
 
-`results` 每项含 `domain` / `tld` / `status`（`available` / `unavailable` / `uncertain`）/ `available`（布尔）/ `price`（可用时的注册价，如 `3 USD`，不可用时为 `null`）/ `badges`（原始徽标：价格、注册年份、`29 days ago` 等）。实现是导航到首页 → （可选）打开 TLD 自定义模态框填入后缀 → 输入关键词回车 → 用 `run_script` 轮询等待 SSE 流式结果稳定后逐行提取（圆点颜色判状态、徽标容器取价格），选择器集中在 `bridge-core/src/recipes/querydomains.rs`。
+`results` 每项含 `domain` / `tld` / `status`（`available` / `unavailable` / `uncertain`）/ `available`（布尔）/ `price`（可用时的注册价，如 `3 USD`，不可用时为 `null`）/ `badges`（原始徽标：价格、注册年份、`29 days ago` 等）。实现是导航到首页 → 每次都打开 TLD 自定义模态框显式写入后缀（站点会持久化自定义列表，不重置就不是默认 14 个）→ 输入关键词回车 → 用 `run_script` 等到批量检查流（`/api/upstream/check` 的 resource entry 只在请求完成后出现）真正结束后逐行提取（圆点颜色判状态、徽标容器取价格），选择器集中在 `bridge-core/src/recipes/querydomains.rs`。个别 TLD 可能没有价格徽标（上游未返回定价），此时 `price` 为 `null`，属站点数据问题而非超时。
 
 ### redditsearch
 

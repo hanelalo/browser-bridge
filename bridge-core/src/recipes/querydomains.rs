@@ -1,6 +1,7 @@
 //! Query.Domains 域名批量查询配方：站点知识（选择器）集中在这里，
 //! 通过通用原语 navigate + click + set_value + press_key + run_script 编排。
 //! 按关键词同时查询多个 TLD 的注册情况与价格（基于 WHOIS，SSE 流式返回）。
+//! 每次查询都会显式设置 TLD 列表（站点会持久化自定义后缀，不能信任页面残留状态）。
 
 use serde_json::{json, Value};
 
@@ -48,16 +49,20 @@ async fn wait_input_ready(bridge: &mut Bridge, tab_id: &Value) -> Result<(), Str
     Ok(())
 }
 
-/// 页面内执行脚本：轮询等待结果行（SSE 流式返回），稳定后按行提取
-/// 域名 / 状态（可用/不可用/不确定）/ 徽标（价格、注册年份等）。
+/// 页面内执行脚本：轮询等待批量检查的 SSE 流真正结束（`/api/upstream/check` 的
+/// resource entry 只在请求完成后出现），再按行提取域名 / 状态 / 徽标。
+/// 若入口 URL 变化导致匹配不到，退化为「行内容 10 秒无变化」的兜底判断
+/// （流式耗时可达 10s+，兜底窗口必须长于它，否则会在价格到达前误判结束）。
 fn extract_script(query: &str, expected: usize) -> String {
-    let q = serde_json::to_string(query).unwrap_or_else(|_| "\"\"".into());
+    let q = serde_json::to_string(&query.trim().to_lowercase()).unwrap_or_else(|_| "\"\"".into());
+    let marker = format!("api/upstream/check?domain={}.", query.trim().to_lowercase());
     format!(
         r#"(async () => {{
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + 25000;
   const kw = {q};
   const want = {expected};
+  const marker = {m};
   const read = () => Array.from(document.querySelectorAll('div.group.relative'))
     .filter((r) => {{
       const d = r.querySelector('.font-medium');
@@ -87,24 +92,34 @@ fn extract_script(query: &str, expected: usize) -> String {
   let rows = [];
   let lastSig = '';
   let stableSince = 0;
+  let streamDone = false;
+  let streamDoneAt = 0;
   while (Date.now() < deadline) {{
     rows = read();
     const sig = rows.map((r) => r.status + '|' + r.badges.join(',')).join(';');
-    const done = rows.length >= want && rows.every((r) => r.badges.length > 0 && r.status !== 'uncertain');
-    if (done) break;
+    if (!streamDone && performance.getEntriesByType('resource').some((e) => e.name.includes(marker))) {{
+      streamDone = true;
+      streamDoneAt = Date.now();
+    }}
+    const allBadged = rows.length >= want && rows.every((r) => r.badges.length > 0);
+    // 流已结束：等最后的徽标渲染（给 1.5s 余量），随后无论行状态如何都退出
+    if (streamDone && rows.length >= want && (allBadged || Date.now() - streamDoneAt > 1500)) break;
+    // 兜底：入口 URL 匹配不到时，按行内容 10 秒无变化判断
     if (sig !== lastSig) {{
       lastSig = sig;
       stableSince = Date.now();
-    }} else if (rows.length > 0 && Date.now() - stableSince > 3000) {{
+    }} else if (rows.length > 0 && Date.now() - stableSince > 10000) {{
       break;
     }}
     await sleep(300);
   }}
   return {{
     rows,
-    complete: rows.length >= want && rows.every((r) => r.badges.length > 0 && r.status !== 'uncertain'),
+    complete: streamDone && rows.length >= want,
   }};
 }})()"#
+        ,
+        m = serde_json::to_string(&marker).unwrap_or_else(|_| "\"\"".into())
     )
 }
 
@@ -126,8 +141,8 @@ fn is_price_badge(s: &str) -> bool {
         && rest[0].chars().all(|c| c.is_ascii_uppercase())
 }
 
-/// 按关键词批量查询域名：导航到 Query.Domains 首页（可选先自定义 TLD 列表），
-/// 输入关键词回车，轮询提取每个 TLD 的注册状态与价格。
+/// 按关键词批量查询域名：导航到 Query.Domains 首页，显式设置 TLD 列表
+/// （默认 14 个后缀），输入关键词回车，等到批量检查流结束再提取每个 TLD 的注册状态与价格。
 /// 返回 `{ "tab_id": ..., "query": ..., "tlds": [...], "complete": bool, "results": [...] }`。
 pub async fn querydomains(
     bridge: &mut Bridge,
@@ -161,44 +176,39 @@ pub async fn querydomains(
     let tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
     wait_input_ready(bridge, &tab_id).await?;
 
-    // 2. 自定义 TLD 列表（与默认不同才打开模态框）
-    let same_as_default = tlds
-        .iter()
-        .map(String::as_str)
-        .eq(DEFAULT_TLDS.iter().copied());
-    if !same_as_default {
-        bridge
-            .request(
-                "qd2",
-                "click",
-                json!({
-                    "target": target::spec("css", TLD_TRIGGER, None),
-                    "tab_id": tab_id,
-                }),
-            )
-            .await?;
-        bridge
-            .request(
-                "qd3",
-                "set_value",
-                json!({
-                    "target": target::spec("css", TLD_TEXTAREA, None),
-                    "value": tlds.join("\n"),
-                    "tab_id": tab_id,
-                }),
-            )
-            .await?;
-        bridge
-            .request(
-                "qd4",
-                "click",
-                json!({
-                    "target": target::spec("text", "Confirm", None),
-                    "tab_id": tab_id,
-                }),
-            )
-            .await?;
-    }
+    // 2. 显式设置 TLD 列表（站点的自定义列表会持久化，不能信任页面当前状态，
+    //    否则上次自定义的后缀会残留，导致行数与 want 不一致）
+    bridge
+        .request(
+            "qd2",
+            "click",
+            json!({
+                "target": target::spec("css", TLD_TRIGGER, None),
+                "tab_id": tab_id,
+            }),
+        )
+        .await?;
+    bridge
+        .request(
+            "qd3",
+            "set_value",
+            json!({
+                "target": target::spec("css", TLD_TEXTAREA, None),
+                "value": tlds.join("\n"),
+                "tab_id": tab_id,
+            }),
+        )
+        .await?;
+    bridge
+        .request(
+            "qd4",
+            "click",
+            json!({
+                "target": target::spec("text", "Confirm", None),
+                "tab_id": tab_id,
+            }),
+        )
+        .await?;
 
     // 3. 输入关键词并回车触发查询
     bridge
