@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
+use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
@@ -133,6 +134,17 @@ enum Cmd {
         /// 地区（默认 Worldwide）
         #[arg(long, default_value = "Worldwide")]
         geo: String,
+    },
+    /// 用 Query.Domains 按关键词批量查询域名注册情况与价格（WHOIS，SSE 流式返回）
+    Querydomains {
+        /// 域名关键词（如 browserbridge）
+        query: String,
+        /// 要检查的 TLD 列表，逗号分隔（默认 com,ai,org,net,cn,info,app,io,xyz,co,run,me,pro,top；最多 20 个）
+        #[arg(long, value_delimiter = ',')]
+        tlds: Option<Vec<String>>,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
     },
     /// 导航到指定 URL
     Navigate {
@@ -419,6 +431,24 @@ async fn main() {
                 }
             };
             match googletrends_compare(&mut bridge, &terms, &date, &geo).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::Querydomains { query, tlds, tab } => {
+            let tlds = tlds.unwrap_or_default();
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match querydomains(&mut bridge, &query, &tlds, tab).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");

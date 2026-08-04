@@ -45,6 +45,7 @@ cargo run -- navigate https://example.com
 cargo run -- click '#submit'
 cargo run -- set_value '#username' alice
 cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
+cargo run -- querydomains 'browserbridge'
 cargo run -- googlesearch 'Haze Seas'
 cargo run -- redditsearch 'rust programming'
 cargo run -- youtubesearch 'rust programming' --time week --sort popularity --max 10
@@ -81,6 +82,7 @@ cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 | `youtubeinfo '<视频URL或ID>'` | 获取指定 YouTube 视频详情：字幕全文、URL、作者、时长、点赞/评论/订阅数，输出 `{ tab_id, video }` |
 | `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ trend[], top[], rising[] }` |
 | `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
+| `querydomains '<关键词>' [--tlds 'com,ai,xyz']` | Query.Domains 批量查域名注册情况与价格，输出 `{ results[] }`（每项含 domain / tld / status / available / price / badges） |
 
 多数指令支持 `--tab <id>` 指定标签页，默认操作当前激活页。
 
@@ -111,6 +113,17 @@ cargo run -- googlesearch 'Haze Seas'
 ```
 
 `target` 是可直接喂给 `click` 的元素定位（`{ by, value, index }`），方便后续点击某个结果。实现是 client 侧的"站点配方"：用通用原语 `navigate` + `scrape` 编排，选择器作为常量集中在 client 里（`#rso > div` 容器、`data-sncf='1'` 描述等），扩展与协议保持通用。
+
+### querydomains
+
+Query.Domains 域名批量查询，按关键词同时检查多个 TLD 的注册情况与注册价格，输出 `{ tab_id, query, tlds, complete, results[] }`：
+
+```sh
+cargo run -- querydomains 'browserbridge'
+cargo run -- querydomains 'browserbridge' --tlds 'dev,cloud,blog'   # 自定义 TLD（默认 14 个，最多 20 个）
+```
+
+`results` 每项含 `domain` / `tld` / `status`（`available` / `unavailable` / `uncertain`）/ `available`（布尔）/ `price`（可用时的注册价，如 `3 USD`，不可用时为 `null`）/ `badges`（原始徽标：价格、注册年份、`29 days ago` 等）。实现是导航到首页 → （可选）打开 TLD 自定义模态框填入后缀 → 输入关键词回车 → 用 `run_script` 轮询等待 SSE 流式结果稳定后逐行提取（圆点颜色判状态、徽标容器取价格），选择器集中在 `bridge-core/src/recipes/querydomains.rs`。
 
 ### redditsearch
 

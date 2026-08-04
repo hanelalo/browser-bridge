@@ -7,6 +7,7 @@ use std::sync::Arc;
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
+use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
@@ -257,6 +258,17 @@ struct GoogletrendsCompareParams {
     /// 地区（默认 Worldwide）
     #[serde(default)]
     geo: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct QuerydomainsParams {
+    /// 域名关键词（如 browserbridge）
+    query: String,
+    /// 要检查的 TLD 列表（默认 com,ai,org,net,cn,info,app,io,xyz,co,run,me,pro,top；最多 20 个）
+    #[serde(default)]
+    tlds: Option<Vec<String>>,
+    #[serde(default)]
+    tab_id: Option<i32>,
 }
 
 // ---------- 工具辅助 ----------
@@ -616,6 +628,24 @@ impl BridgeMcp {
             &p.terms,
             p.date.as_deref().unwrap_or("today 1-m"),
             p.geo.as_deref().unwrap_or("Worldwide"),
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "querydomains", description = "用 Query.Domains 按关键词批量查询域名注册情况与价格，返回 { tab_id, query, tlds, complete, results[] }（每项含 domain/tld/status/available/price/badges；status: available|unavailable|uncertain）")]
+    pub async fn querydomains_tool(
+        &self,
+        params: Parameters<QuerydomainsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = querydomains(
+            &mut bridge,
+            &p.query,
+            p.tlds.as_deref().unwrap_or(&[]),
+            p.tab_id,
         )
         .await
         .map_err(|e| ErrorData::internal_error(e, None))?;

@@ -3,6 +3,7 @@
 
 pub mod googlesearch;
 pub mod googletrends;
+pub mod querydomains;
 pub mod redditsearch;
 pub mod youtubeinfo;
 pub mod youtubesearch;
