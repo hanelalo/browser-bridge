@@ -412,6 +412,39 @@ result：
 { "title": "Example", "url": "https://example.com", "text": "..." }
 ```
 
+### get_page_markdown
+
+把指定页面内容转换成标准 Markdown（GFM：标题 / 段落 / 列表 / 表格 / 代码块 / 引用块 / 链接 / 图片 / 加粗 / 斜体 / 删除线 / 行内代码），默认当前激活标签页。转换在页面内直接遍历渲染后的 DOM，因此 SPA 动态渲染的内容也会包含在内。
+
+自动跳过：`script` / `style` / `noscript` / `template`、隐藏元素（`hidden` / `aria-hidden="true"` / `display:none` / `visibility:hidden`）、表单控件、iframe 等非正文内容。
+
+params：
+
+```json
+{
+  "tab_id": 7,
+  "url": "https://example.com/docs",
+  "selector": "article"
+}
+```
+
+- `tab_id`：可选，目标标签页（默认当前激活页）。
+- `url`：可选，先导航到该 URL 并等待加载完成，再转换。
+- `selector`：可选，只转换匹配该 CSS 选择器的容器（如 `article` / `#content`），用于排除导航栏、侧栏等杂质。
+
+result：
+
+```json
+{
+  "tab_id": 7,
+  "title": "Example",
+  "url": "https://example.com/docs",
+  "markdown": "# Example\n\n正文..."
+}
+```
+
+图片与链接会转成绝对 URL；代码块语言从 `language-*` / `lang-*` / `highlight-*` class 或 `data-lang` 识别。
+
 ## 服务端错误
 
 | error | 场景 |

@@ -315,6 +315,18 @@ enum Cmd {
         #[arg(long)]
         tab: Option<i32>,
     },
+    /// 把页面内容转换成标准 Markdown（标题/段落/列表/表格/代码块/链接/图片）
+    GetPageMarkdown {
+        /// 可选：先导航到该 URL 再转换（省略则用当前/指定标签页）
+        #[arg(long)]
+        url: Option<String>,
+        /// 可选：只转换匹配选择器的容器（如 article / #content）
+        #[arg(long)]
+        selector: Option<String>,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
 }
 
 #[tokio::main]
@@ -602,6 +614,16 @@ async fn main() {
             ("scrape", params)
         }
         Cmd::GetPageContent { tab } => ("get_page_content", json!({ "tab_id": tab })),
+        Cmd::GetPageMarkdown { url, selector, tab } => {
+            let mut params = json!({ "tab_id": tab });
+            if let Some(u) = url {
+                params["url"] = json!(u);
+            }
+            if let Some(s) = selector {
+                params["selector"] = json!(s);
+            }
+            ("get_page_markdown", params)
+        }
     };
 
     if let Err(err) = run(&cli.server, method, params).await {

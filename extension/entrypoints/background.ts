@@ -221,6 +221,8 @@ async function execute(
       return runPageOp(method, params, clientId);
     case 'get_page_content':
       return getPageContent(params);
+    case 'get_page_markdown':
+      return getPageMarkdown(params);
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -532,6 +534,58 @@ async function getPageContent(params: Record<string, unknown>): Promise<unknown>
     }),
   });
   return { ...(result?.result ?? {}), tab_id: tab.id };
+}
+
+/** 把指定页面内容转换成标准 Markdown；可选先导航到 url，可选只转换 selector 命中的容器。 */
+async function getPageMarkdown(params: Record<string, unknown>): Promise<unknown> {
+  let tab = await resolveTab(params.tab_id as number | undefined);
+  const url = typeof params.url === 'string' && params.url ? params.url : '';
+  if (url) {
+    if (tab.id == null) throw new Error('tab has no id');
+    const done = waitForComplete(tab.id);
+    await chrome.tabs.update(tab.id, { url });
+    await done;
+    tab = await chrome.tabs.get(tab.id);
+  }
+  if (tab.id == null) throw new Error('tab has no id');
+  // 先注入 Turndown 转换器（unlisted script，已打包 turndown + gfm 插件），再调用转换
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ['page-markdown.js'],
+  });
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: pageMarkdownOp,
+    args: [params],
+  });
+  const r = (result?.result ?? {}) as {
+    __bridge_error?: string;
+    title?: string;
+    url?: string;
+    markdown?: string;
+  };
+  if (r.__bridge_error) throw new Error(r.__bridge_error);
+  return {
+    title: r.title ?? '',
+    url: r.url ?? '',
+    markdown: r.markdown ?? '',
+    tab_id: tab.id,
+  };
+}
+
+/**
+ * 页面级 Markdown 转换器入口：转换核心在 unlisted script
+ * (entrypoints/page-markdown.ts，基于开源 Turndown + GFM 插件)注入后定义，
+ * 这里只负责在页面隔离世界里转发调用。
+ */
+function pageMarkdownOp(params: Record<string, unknown>): unknown {
+  const fn = (globalThis as Record<string, unknown>).__bridgePageMarkdown as
+    | ((p: Record<string, unknown>) => unknown)
+    | undefined;
+  if (typeof fn !== 'function') {
+    return { __bridge_error: 'page-markdown script not injected' };
+  }
+  return fn(params);
 }
 
 /** 关闭标签页（默认当前激活标签页）。 */

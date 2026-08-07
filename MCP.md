@@ -241,6 +241,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `close_auto_tabs` | 关闭本会话（当前 MCP 进程）自动打开的标签页（`new_tab` / `click --new-tab` / `googletrends` 创建的），不影响其他会话 | 无 |
 | `navigate` | 导航到指定 URL 并等待加载完成 | `url`（必填）、`tab_id` |
 | `get_page_content` | 读取页面标题 / URL / 文本 | `tab_id` |
+| `get_page_markdown` | 把页面内容转换为标准 Markdown | `url`、`selector`、`tab_id` |
 | `scrape` | 按 CSS 选择器提取结构化数据 | `item`（必填，结果容器选择器）、`fields`（字段映射：`字段名: "选择器[@属性]"`）、`title` / `link` / `desc`、`timeout`、`tab_id` |
 | `run_script` | 在页面执行任意 JS 表达式，返回 JSON 序列化结果 | `code`（必填）、`tab_id` |
 | `click` | 点击匹配定位的元素 | `target`（必填）、`by`、`index`、`timeout`（默认 5000ms）、`new_tab`（锚点在新标签页打开，默认 false）、`tab_id` |
@@ -252,6 +253,20 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `select_option` | 选中 `<select>` 的某个选项 | `target`（必填）、`option_value` / `option_text` / `option_index`（三选一）、`by`、`index`、`tab_id` |
 | `clear` | 清空 input / textarea / contenteditable | `target`（必填）、`by`、`index`、`tab_id` |
 | `get_value` | 读取元素当前值（用于验证） | `target`（必填）、`by`、`index`、`tab_id` |
+
+#### get_page_markdown
+
+把指定页面内容转换成标准 Markdown（GFM：标题 / 段落 / 列表 / 表格 / 代码块 / 引用块 / 链接 / 图片 / 加粗 / 斜体 / 删除线 / 行内代码）。转换在页面内直接遍历渲染后的 DOM，SPA 动态渲染的内容也会包含；自动跳过脚本、隐藏元素与表单控件，链接/图片转成绝对 URL。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `url` | string | — | 当前标签页 | 可选；先导航到该 URL 并等待加载完成，再转换 |
+| `selector` | string | — | 整个页面 | 可选；只转换匹配该 CSS 选择器的容器（如 `article` / `#content`），用于排除正文外的杂质 |
+| `tab_id` | int | — | 当前激活页 | 目标标签页 |
+
+返回：`{ "tab_id": int, "title": string, "url": string, "markdown": string }`。
 
 ## 多 agent / 多客户端使用
 

@@ -52,6 +52,7 @@ cargo run -- youtubesearch 'rust programming' --time week --sort popularity --ma
 cargo run -- youtubeinfo 'https://www.youtube.com/watch?v=rQ_J9WH6CGk'
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
+cargo run -- get-page-markdown --url https://example.com
 ```
 
 ### 指令速查表
@@ -76,6 +77,7 @@ cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 | `scrape <item> --fields '...'` | 按选择器提取结构化数据 |
 | `run-script '<js>'` | 页面里执行任意 JS，返回 JSON |
 | `get-page-content` | 读取页面标题/URL/文本 |
+| `get-page-markdown [--url <url>] [--selector <css>]` | 把页面内容转换成标准 Markdown（标题/段落/列表/表格/代码块/链接/图片） |
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 | `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
@@ -103,6 +105,20 @@ cargo run -- close-auto-tabs   # 关闭刚才 googletrends 开的标签页
 ```
 
 **不会被清理的**：手动开的标签页（如 Sitemap Monitor）、以及 `navigate` / `googlesearch` / `redditsearch` 复用的当前标签页（这些不新开 tab，属于"工作标签页"，留着是正常的）。
+
+### get-page-markdown
+
+把页面内容转换成标准 Markdown，输出 `{ tab_id, title, url, markdown }`。转换在页面内直接遍历渲染后的 DOM，SPA 动态渲染的内容也会包含；自动跳过脚本、隐藏元素与表单控件，链接/图片转成绝对 URL。转换核心基于开源 [Turndown](https://github.com/mixmark-io/turndown) + [@joplin/turndown-plugin-gfm](https://github.com/laurent22/joplin/tree/dev/packages/turndown-plugin-gfm)（GFM 表格 / 删除线 / 任务列表）。
+
+```sh
+cargo run -- get-page-markdown                                  # 当前标签页
+cargo run -- get-page-markdown --url https://example.com/docs   # 先导航再转换
+cargo run -- get-page-markdown --selector article               # 只转换 article 容器
+cargo run -- get-page-markdown --selector '#content' --tab 7    # 指定标签页 + 指定容器
+```
+
+- `--url`：可选，先导航到该 URL 并等待加载完成，再转换。
+- `--selector`：可选，只转换匹配该 CSS 选择器的容器（如 `article` / `#content`），正文之外的导航栏、侧栏等杂质可以通过它排除。
 
 ### googlesearch
 
@@ -223,7 +239,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

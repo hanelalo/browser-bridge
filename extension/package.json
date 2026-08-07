@@ -11,11 +11,14 @@
   "packageManager": "pnpm@10.33.2+sha1.0d3e2b51a2bdbb7895ddb8085a0c46db642752d7",
   "devDependencies": {
     "@types/chrome": "^0.2.5",
+    "@types/turndown": "^5.0.6",
     "@wxt-dev/module-vue": "^1.0.3",
     "typescript": "^7.0.2",
     "wxt": "^0.21.3"
   },
   "dependencies": {
+    "@joplin/turndown-plugin-gfm": "^1.0.67",
+    "turndown": "^7.2.4",
     "vue": "^3.5.40"
   }
 }
