@@ -1,9 +1,11 @@
 import { defineUnlistedScript } from '#imports';
 import TurndownService from 'turndown';
 import { gfm } from '@joplin/turndown-plugin-gfm';
+import { Readability } from '@mozilla/readability';
 
 interface PageMarkdownParams {
   selector?: string;
+  full?: boolean;
 }
 
 /**
@@ -117,7 +119,8 @@ function makePageMarkdownConverter(): (params: PageMarkdownParams) => unknown {
         typeof params?.selector === 'string' && params.selector.trim()
           ? params.selector.trim()
           : '';
-      let root: HTMLElement | Document;
+      const full = params?.full === true;
+      let source: HTMLElement | Document | string;
       if (selector) {
         let el: Element | null = null;
         try {
@@ -126,12 +129,29 @@ function makePageMarkdownConverter(): (params: PageMarkdownParams) => unknown {
           throw new Error(`invalid selector: ${selector}`);
         }
         if (!el) throw new Error(`selector not found: ${selector}`);
-        root = el as HTMLElement;
-      } else {
+        source = el as HTMLElement;
+      } else if (full) {
         if (!document.body) throw new Error('page has no body');
-        root = document.body;
+        source = document.body;
+      } else {
+        // 自动正文提取：Readability（Firefox 阅读模式同款）在 DOM 副本上抽取主内容，
+        // 抽不到或内容太少时退回整页转换
+        let article: { content: string; textContent: string } | null = null;
+        try {
+          article = new Readability(document.cloneNode(true) as Document).parse();
+        } catch {
+          article = null;
+        }
+        if (article && (article.textContent ?? '').trim().length >= 50) {
+          source = article.content;
+        } else {
+          if (!document.body) throw new Error('page has no body');
+          source = document.body;
+        }
       }
-      const markdown = service.turndown(root as TurndownService.Node).trim();
+      const markdown = service
+        .turndown(source as TurndownService.Node | string)
+        .trim();
       return {
         title: document.title ?? '',
         url: location.href,

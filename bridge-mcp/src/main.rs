@@ -279,6 +279,9 @@ struct GetPageMarkdownParams {
     /// 可选：只转换匹配选择器的容器（如 article / #content）
     #[serde(default)]
     selector: Option<String>,
+    /// 跳过正文自动提取，转换整个页面
+    #[serde(default)]
+    full: Option<bool>,
     #[serde(default)]
     tab_id: Option<i32>,
 }
@@ -551,7 +554,7 @@ impl BridgeMcp {
         call(&self.bridge, "gpc", "get_page_content", json!({ "tab_id": params.0.tab_id })).await
     }
 
-    #[tool(name = "get_page_markdown", description = "把指定页面内容转换为标准 Markdown（标题/段落/列表/表格/代码块/链接/图片），返回 { tab_id, title, url, markdown }。可传 url 先导航，或传 selector 只转换某个容器（如 article / #content）")]
+    #[tool(name = "get_page_markdown", description = "把指定页面内容转换为标准 Markdown（标题/段落/列表/表格/代码块/链接/图片），返回 { tab_id, title, url, markdown }。默认用 Readability 自动提取正文去除导航/页脚等噪音，可传 url 先导航；selector 只转换某个容器（如 article / #content）；full=true 时跳过提取转换整个页面")]
     pub async fn get_page_markdown(
         &self,
         params: Parameters<GetPageMarkdownParams>,
@@ -563,6 +566,9 @@ impl BridgeMcp {
         }
         if let Some(s) = p.selector {
             v["selector"] = json!(s);
+        }
+        if p.full.unwrap_or(false) {
+            v["full"] = json!(true);
         }
         call(&self.bridge, "gpm", "get_page_markdown", v).await
     }

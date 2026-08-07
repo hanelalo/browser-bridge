@@ -11,6 +11,9 @@ importers:
       '@joplin/turndown-plugin-gfm':
         specifier: ^1.0.67
         version: 1.0.67
+      '@mozilla/readability':
+        specifier: ^0.6.0
+        version: 0.6.0
       turndown:
         specifier: ^7.2.4
         version: 7.2.4
@@ -99,6 +102,10 @@ packages:
 
   '@mixmark-io/domino@2.2.0':
     resolution: {integrity: sha512-Y28PR25bHXUg88kCV7nivXrP2Nj2RueZ3/l/jdx6J9f8J4nsEGcgX0Qe6lt7Pa+J79+kPiJU3LguR6O/6zrLOw==}
+
+  '@mozilla/readability@0.6.0':
+    resolution: {integrity: sha512-juG5VWh4qAivzTAeMzvY9xs9HY5rAcr2E4I7tiSSCokRFi7XIZCAu92ZkSTsIj1OPceCifL3cpfteP3pDT9/QQ==}
+    engines: {node: '>=14.0.0'}
 
   '@napi-rs/wasm-runtime@1.2.2':
     resolution: {integrity: sha512-JfB4kuJQjaoHuCTseIINHtHWeJnvgEcxjwA5t/Y00ZgaOO1Crz3fjT/p8kT28zA/Caz7oiUMn3d6H2yOVCVwuw==}
@@ -1090,6 +1097,8 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
 
   '@mixmark-io/domino@2.2.0': {}
+
+  '@mozilla/readability@0.6.0': {}
 
   '@napi-rs/wasm-runtime@1.2.2(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
     dependencies:

@@ -323,6 +323,9 @@ enum Cmd {
         /// 可选：只转换匹配选择器的容器（如 article / #content）
         #[arg(long)]
         selector: Option<String>,
+        /// 跳过正文自动提取，转换整个页面
+        #[arg(long)]
+        full: bool,
         /// 指定标签页 id（默认当前激活标签页）
         #[arg(long)]
         tab: Option<i32>,
@@ -614,13 +617,21 @@ async fn main() {
             ("scrape", params)
         }
         Cmd::GetPageContent { tab } => ("get_page_content", json!({ "tab_id": tab })),
-        Cmd::GetPageMarkdown { url, selector, tab } => {
+        Cmd::GetPageMarkdown {
+            url,
+            selector,
+            full,
+            tab,
+        } => {
             let mut params = json!({ "tab_id": tab });
             if let Some(u) = url {
                 params["url"] = json!(u);
             }
             if let Some(s) = selector {
                 params["selector"] = json!(s);
+            }
+            if full {
+                params["full"] = json!(true);
             }
             ("get_page_markdown", params)
         }

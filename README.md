@@ -77,7 +77,7 @@ cargo run -- get-page-markdown --url https://example.com
 | `scrape <item> --fields '...'` | 按选择器提取结构化数据 |
 | `run-script '<js>'` | 页面里执行任意 JS，返回 JSON |
 | `get-page-content` | 读取页面标题/URL/文本 |
-| `get-page-markdown [--url <url>] [--selector <css>]` | 把页面内容转换成标准 Markdown（标题/段落/列表/表格/代码块/链接/图片） |
+| `get-page-markdown [--url <url>] [--selector <css>] [--full]` | 把页面内容转换成标准 Markdown（默认自动提取正文，去掉导航/页脚等噪音） |
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 | `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
@@ -108,17 +108,20 @@ cargo run -- close-auto-tabs   # 关闭刚才 googletrends 开的标签页
 
 ### get-page-markdown
 
-把页面内容转换成标准 Markdown，输出 `{ tab_id, title, url, markdown }`。转换在页面内直接遍历渲染后的 DOM，SPA 动态渲染的内容也会包含；自动跳过脚本、隐藏元素与表单控件，链接/图片转成绝对 URL。转换核心基于开源 [Turndown](https://github.com/mixmark-io/turndown) + [@joplin/turndown-plugin-gfm](https://github.com/laurent22/joplin/tree/dev/packages/turndown-plugin-gfm)（GFM 表格 / 删除线 / 任务列表）。
+把页面内容转换成标准 Markdown，输出 `{ tab_id, title, url, markdown }`。转换在页面内直接遍历渲染后的 DOM，SPA 动态渲染的内容也会包含；自动跳过脚本、隐藏元素与表单控件，链接/图片转成绝对 URL。转换核心基于开源 [Turndown](https://github.com/mixmark-io/turndown) + [@joplin/turndown-plugin-gfm](https://github.com/laurent22/joplin/tree/dev/packages/turndown-plugin-gfm)（GFM 表格 / 删除线 / 任务列表），正文提取用 [@mozilla/readability](https://github.com/mozilla/readability)（Firefox 阅读模式同款）。
 
 ```sh
-cargo run -- get-page-markdown                                  # 当前标签页
+cargo run -- get-page-markdown                                  # 当前标签页（自动提取正文）
 cargo run -- get-page-markdown --url https://example.com/docs   # 先导航再转换
 cargo run -- get-page-markdown --selector article               # 只转换 article 容器
+cargo run -- get-page-markdown --full                           # 跳过提取，转换整页
 cargo run -- get-page-markdown --selector '#content' --tab 7    # 指定标签页 + 指定容器
 ```
 
 - `--url`：可选，先导航到该 URL 并等待加载完成，再转换。
-- `--selector`：可选，只转换匹配该 CSS 选择器的容器（如 `article` / `#content`），正文之外的导航栏、侧栏等杂质可以通过它排除。
+- 默认行为：用 Readability 自动提取主内容（去掉导航 / 页脚 / 相关文章等噪音），提取不到或内容过少时退回整页转换。
+- `--selector`：可选，只转换匹配该 CSS 选择器的容器（如 `article` / `#content`），优先级最高。
+- `--full`：可选，跳过正文自动提取，转换整个页面。
 
 ### googlesearch
 

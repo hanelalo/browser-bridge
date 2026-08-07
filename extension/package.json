@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@joplin/turndown-plugin-gfm": "^1.0.67",
+    "@mozilla/readability": "^0.6.0",
     "turndown": "^7.2.4",
     "vue": "^3.5.40"
   }
