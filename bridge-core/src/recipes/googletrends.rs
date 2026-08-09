@@ -23,6 +23,20 @@ fn trends_script(date_spec: &str) -> String {
       if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
     }});
   }};
+  // 打开后先等 2~3 秒让页面完成首屏渲染，再按 20%/50%/80%/100% 分段下滑，
+  // 每段间隔 500ms，避免一打开页面就直接跳到底部
+  const stagedScroll = async () => {{
+    await sleep(2000 + Math.random() * 1000);
+    for (const pct of [0.2, 0.5, 0.8, 1]) {{
+      const maxY = document.body.scrollHeight - window.innerHeight;
+      window.scrollTo(0, Math.max(0, maxY * pct));
+      Array.from(document.querySelectorAll('div')).forEach((el) => {{
+        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight * pct;
+      }});
+      await sleep(500);
+    }}
+  }};
+  await stagedScroll();
   let svg = null;
   let line = null;
   while (Date.now() < deadline) {{
@@ -170,6 +184,20 @@ fn compare_script(terms: &[String], date_spec: &str) -> String {
       if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
     }});
   }};
+  // 打开后先等 2~3 秒让页面完成首屏渲染，再按 20%/50%/80%/100% 分段下滑，
+  // 每段间隔 500ms，避免一打开页面就直接跳到底部
+  const stagedScroll = async () => {{
+    await sleep(2000 + Math.random() * 1000);
+    for (const pct of [0.2, 0.5, 0.8, 1]) {{
+      const maxY = document.body.scrollHeight - window.innerHeight;
+      window.scrollTo(0, Math.max(0, maxY * pct));
+      Array.from(document.querySelectorAll('div')).forEach((el) => {{
+        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight * pct;
+      }});
+      await sleep(500);
+    }}
+  }};
+  await stagedScroll();
   let svg = null;
   let lines = null;
   while (Date.now() < deadline) {{
