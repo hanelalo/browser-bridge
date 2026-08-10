@@ -205,6 +205,7 @@ cargo run -- youtuberinfo '@xiaojunpodcast' --max 20   # 最多返回 20 条
 - `--max`：最多返回多少条视频（默认 10，至少 1）
 - 数据来自频道页 HTML 内嵌的 `ytInitialData` + InnerTube `browse` continuation（yt-dlp 同款数据源）：首屏直接解析，不足 `--max` 条时自动续取；不依赖页面渲染、滚动或窗口可见性，标签页在后台也能拿满
 - 订阅数同时兼容新旧版频道页结构（`c4TabbedHeaderRenderer` 与新版 `contentMetadataViewModel`）
+- 视频条目同样兼容新旧版结构：旧版 `videoRenderer` / `gridVideoRenderer` 与 2026 年新版频道页的 `lockupViewModel`（`richItemRenderer` + `lockupViewModel`）都能解析，实测新版已全面切换
 
 ### googletrends
 
@@ -237,12 +238,12 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
 ├── transport.rs          # 连接 / 自动拉起 server / 请求 / 可重连 Bridge
 ├── target.rs             # 元素定位参数（css / text / xpath）
 └── recipes/              # 站点配方
-├── googlesearch.rs   # Google 搜索（选择器 + 编排）
-├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
-├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
-├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
-├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
-└── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
+    ├── googlesearch.rs   # Google 搜索（选择器 + 编排）
+    ├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
+    ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
+    ├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
+    ├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
+    └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
