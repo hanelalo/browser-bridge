@@ -2,7 +2,9 @@
 //! 通过 bridge-core 复用协议传输（含自动拉起 server、断线重连）。
 
 use std::collections::HashMap;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
@@ -23,6 +25,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 const DEFAULT_SERVER: &str = "ws://127.0.0.1:9225";
+const NO_EXTENSION_ERR: &str = "no extension connected";
 
 #[derive(Clone)]
 struct BridgeMcp {
@@ -300,11 +303,96 @@ async fn call(
     params: Value,
 ) -> Result<CallToolResult, ErrorData> {
     let mut b = bridge.lock().await;
-    let result = b
-        .request(id, method, params)
-        .await
-        .map_err(|e| ErrorData::internal_error(e, None))?;
-    ok(result)
+    match b.request(id, method, params.clone()).await {
+        Ok(v) => return ok(v),
+        Err(e) if e.contains(NO_EXTENSION_ERR) => {
+            // Chrome 没在运行（或扩展没连上）：拉起默认 Chrome，等扩展注册后重试
+            eprintln!("[bridge-mcp] no extension connected, ensuring Chrome is running");
+            if let Err(launch_err) = ensure_chrome_running() {
+                return Err(ErrorData::internal_error(launch_err, None));
+            }
+        }
+        Err(e) => return Err(ErrorData::internal_error(e, None)),
+    }
+    // 扩展连接 server 有 500ms→5s 退避重连；Chrome 冷启动可能较慢，留足 ~30s
+    let delays_ms: [u64; 8] = [1500, 2000, 3000, 4000, 5000, 5000, 5000, 5000];
+    for (attempt, delay) in delays_ms.iter().enumerate() {
+        eprintln!("[bridge-mcp] waiting {delay}ms for extension (attempt {})", attempt + 1);
+        tokio::time::sleep(Duration::from_millis(*delay)).await;
+        match b.request(id, method, params.clone()).await {
+            Ok(v) => return ok(v),
+            Err(e) if e.contains(NO_EXTENSION_ERR) => continue,
+            Err(e) => return Err(ErrorData::internal_error(e, None)),
+        }
+    }
+    Err(ErrorData::internal_error(
+        "no extension connected：已尝试拉起 Chrome，请确认浏览器里加载了 Browser Bridge 扩展",
+        None,
+    ))
+}
+
+/// 检查 Chrome 是否已在运行。
+#[cfg(target_os = "macos")]
+fn chrome_running() -> bool {
+    Command::new("pgrep")
+        .args(["-x", "Google Chrome"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn chrome_running() -> bool {
+    ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
+        .iter()
+        .any(|name| {
+            Command::new("pgrep")
+                .args(["-x", name])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+}
+
+/// 确保 Chrome 在运行：没运行就拉起默认 Chrome（共享用户默认 profile，不另开隔离实例）。
+#[cfg(target_os = "macos")]
+fn ensure_chrome_running() -> Result<(), String> {
+    if chrome_running() {
+        eprintln!("[bridge-mcp] Chrome already running");
+        return Ok(());
+    }
+    eprintln!("[bridge-mcp] launching Chrome via open -a");
+    let status = Command::new("open")
+        .args(["-a", "Google Chrome"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("拉起 Chrome 失败: {e}"))?;
+    if status.success() {
+        eprintln!("[bridge-mcp] open returned success");
+        Ok(())
+    } else {
+        eprintln!("[bridge-mcp] open returned failure");
+        Err("拉起 Chrome 失败：未找到 Google Chrome".to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_chrome_running() -> Result<(), String> {
+    if chrome_running() {
+        return Ok(());
+    }
+    for bin in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"] {
+        if Command::new(bin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err("拉起 Chrome 失败：未在 PATH 中找到 chrome/chromium".to_string())
 }
 
 fn with_target(
