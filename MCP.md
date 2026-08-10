@@ -225,7 +225,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 { "channel": "https://www.youtube.com/@xiaojunpodcast/videos", "max": 10 }
 ```
 
-注意：视频条目与订阅数均兼容新旧版频道页结构——视频条目旧版为 `videoRenderer` / `gridVideoRenderer`、2026 年新版为 `lockupViewModel`（`richItemRenderer` + `lockupViewModel`）；订阅数为 `c4TabbedHeaderRenderer` 与新版 `contentMetadataViewModel`。若页面数据缺失（如频道不存在 / 验证墙 / consent 页）会返回明确错误提示。
+注意：视频条目与订阅数均兼容新旧版频道页结构——视频条目旧版为 `videoRenderer` / `gridVideoRenderer`、2026 年新版为 `lockupViewModel`（`richItemRenderer` + `lockupViewModel`）；订阅数为 `c4TabbedHeaderRenderer` 与新版 `contentMetadataViewModel`。频道页数据在部分会话/变体下会把超长标题截断，配方会用 YouTube 官方 oEmbed 接口兜底校验，把疑似截断的标题替换成完整标题。若页面数据缺失（如频道不存在 / 验证墙 / consent 页）会返回明确错误提示。
 
 #### googletrends
 

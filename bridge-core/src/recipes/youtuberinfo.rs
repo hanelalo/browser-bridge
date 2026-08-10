@@ -4,6 +4,9 @@
 //! yt-dlp 同源，不需要页面渲染、滚动或窗口操作。频道页视频条目同时兼容
 //! 旧版 `videoRenderer`/`gridVideoRenderer` 与新版 `lockupViewModel`（2026 年
 //! 实测 YouTube 新版频道页已全面切到 richItemRenderer + lockupViewModel）。
+//! 频道页数据在部分会话/变体下会把超长标题截断（实测截到 100 字符甚至更短），
+//! 因此最后会用 YouTube 官方 oEmbed 接口兜底校验，把疑似截断的标题替换成
+//! 完整标题。
 
 use serde_json::{json, Value};
 
@@ -295,6 +298,34 @@ const EXTRACT_SCRIPT: &str = r#"(async () => {
     for (const t of next.tokens) enqueue(t);
     rounds++;
   }
+
+  // ---- 标题兜底校验 ----
+  // YouTube 频道页数据在部分会话/变体下会把超长标题截断（实测英文标题被截到
+  // 100 字符，甚至只剩几个单词）。oEmbed 是 YouTube 官方接口，返回完整规范
+  // 标题，且与页面同源可直接 fetch。仅当页面标题疑似截断（长度 >= 100 或含
+  // 省略号）或 oEmbed 标题明显更长时才替换，正常标题不受影响。
+  const looksTruncated = (t) => !t || t.length >= 100 || /…|\.\.\./.test(t);
+  const oembedTitle = async (url) => {
+    try {
+      const r = await fetch('https://www.youtube.com/oembed?url=' + encodeURIComponent(url) + '&format=json', { signal: AbortSignal.timeout(5000) });
+      if (!r.ok) return null;
+      const j = await r.json();
+      return j && typeof j.title === 'string' && j.title.trim() ? j.title.trim() : null;
+    } catch (e) { return null; }
+  };
+  const targets = items.slice(0, MAX);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const i = cursor++;
+      const it = targets[i];
+      const full = await oembedTitle(it.url);
+      if (full && (looksTruncated(it.title) || full.length > (it.title || '').length)) {
+        it.title = full;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, targets.length) }, worker));
 
   return {
     ok: true,

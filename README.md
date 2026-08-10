@@ -206,6 +206,7 @@ cargo run -- youtuberinfo '@xiaojunpodcast' --max 20   # 最多返回 20 条
 - 数据来自频道页 HTML 内嵌的 `ytInitialData` + InnerTube `browse` continuation（yt-dlp 同款数据源）：首屏直接解析，不足 `--max` 条时自动续取；不依赖页面渲染、滚动或窗口可见性，标签页在后台也能拿满
 - 订阅数同时兼容新旧版频道页结构（`c4TabbedHeaderRenderer` 与新版 `contentMetadataViewModel`）
 - 视频条目同样兼容新旧版结构：旧版 `videoRenderer` / `gridVideoRenderer` 与 2026 年新版频道页的 `lockupViewModel`（`richItemRenderer` + `lockupViewModel`）都能解析，实测新版已全面切换
+- 标题完整性兜底：频道页数据在部分会话/变体下会把超长标题截断（实测截到 100 字符甚至更短），配方会用 YouTube 官方 oEmbed 接口校验，发现疑似截断的标题自动替换成完整标题
 
 ### googletrends
 
