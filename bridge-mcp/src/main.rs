@@ -13,6 +13,7 @@ use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
+use bridge_core::recipes::youtuberinfo::youtuberinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
 use bridge_core::transport::{connect_bridge_no_spawn, Bridge};
@@ -249,6 +250,17 @@ struct YoutubesearchParams {
 struct YoutubeinfoParams {
     /// 视频 URL 或 11 位视频 ID（watch?v= / youtu.be / shorts / embed / live 均可）
     url: String,
+    #[serde(default)]
+    tab_id: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct YoutuberinfoParams {
+    /// 频道 URL（如 https://www.youtube.com/@handle/videos）或 handle（如 @handle）
+    channel: String,
+    /// 最多返回的视频条数（默认 10；至少 1）
+    #[serde(default)]
+    max: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
 }
@@ -748,6 +760,19 @@ impl BridgeMcp {
         let p = params.0;
         let mut bridge = self.bridge.lock().await;
         let out = youtubeinfo(&mut bridge, &p.url, p.tab_id)
+            .await
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "youtuberinfo", description = "获取指定 YouTube 频道（youtuber）的视频列表，返回 { tab_id, channel, videos[] }（channel 含 name/url/subscriber_count/subscriber_count_text；videos 每项含 title/url/views/views_count/duration/published/target），最多返回 max 条（默认 10，至少 1）")]
+    pub async fn youtuberinfo_tool(
+        &self,
+        params: Parameters<YoutuberinfoParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = youtuberinfo(&mut bridge, &p.channel, p.max.unwrap_or(10), p.tab_id)
             .await
             .map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)

@@ -50,6 +50,8 @@ cargo run -- googlesearch 'Haze Seas'
 cargo run -- redditsearch 'rust programming'
 cargo run -- youtubesearch 'rust programming' --time week --sort popularity --max 10
 cargo run -- youtubeinfo 'https://www.youtube.com/watch?v=rQ_J9WH6CGk'
+cargo run -- youtuberinfo 'https://www.youtube.com/@xiaojunpodcast/videos'
+cargo run -- youtuberinfo '@xiaojunpodcast' --max 20
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 cargo run -- get-page-markdown --url https://example.com
@@ -82,6 +84,7 @@ cargo run -- get-page-markdown --url https://example.com
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 | `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
 | `youtubeinfo '<视频URL或ID>'` | 获取指定 YouTube 视频详情：字幕全文、URL、作者、时长、点赞/评论/订阅数，输出 `{ tab_id, video }` |
+| `youtuberinfo '<频道URL或handle>' [--max]` | 获取指定 YouTube 频道（youtuber）的视频列表：频道名、订阅数、视频名称/URL/观看数/时长/发布时间，最多返回 `--max` 条（默认 10），输出 `{ tab_id, channel, videos }` |
 | `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ trend[], top[], rising[] }` |
 | `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
 | `querydomains '<关键词>' [--tlds 'com,ai,xyz']` | Query.Domains 批量查域名注册情况与价格，输出 `{ results[] }`（每项含 domain / tld / status / available / price / badges） |
@@ -188,6 +191,21 @@ cargo run -- youtubeinfo 'https://youtu.be/rQ_J9WH6CGk' # youtu.be 短链 / shor
 - 字幕优先用页面内嵌的 `captionTracks`（timedtext json3）；若返回空（YouTube 对 `exp=xpe` 的轨道要求 PO token，页面内无法生成），按 yt-dlp 的做法改用 **android_vr 客户端**调 player API 取无 pot 要求的轨道
 - 同样不依赖页面渲染：数据来自 HTML 内嵌 JSON + InnerTube 接口，标签页在后台也能取到
 
+### youtuberinfo
+
+获取指定 YouTube 频道（youtuber）的视频列表，返回 `{ tab_id, channel, videos[] }`。`channel` 含 `name` / `url` / `subscriber_count`（解析后的整数，`万`/`亿`/`K`/`M` 缩写会换算）/ `subscriber_count_text`（原始文本）；`videos` 每项含 `title` / `url` / `views`（原始文本）/ `views_count`（整数）/ `duration` / `published` / `target`（可直接喂给 `click` 打开视频）：
+
+```sh
+cargo run -- youtuberinfo 'https://www.youtube.com/@xiaojunpodcast/videos'
+cargo run -- youtuberinfo '@xiaojunpodcast'            # 直接传 handle
+cargo run -- youtuberinfo '@xiaojunpodcast' --max 20   # 最多返回 20 条
+```
+
+- 输入支持完整频道 URL（`/@handle`、`/c/`、`/user/`、`/channel/UC...` 均可，末尾带不带 `/videos` 都行）或 handle（`@handle` 或裸 handle）
+- `--max`：最多返回多少条视频（默认 10，至少 1）
+- 数据来自频道页 HTML 内嵌的 `ytInitialData` + InnerTube `browse` continuation（yt-dlp 同款数据源）：首屏直接解析，不足 `--max` 条时自动续取；不依赖页面渲染、滚动或窗口可见性，标签页在后台也能拿满
+- 订阅数同时兼容新旧版频道页结构（`c4TabbedHeaderRenderer` 与新版 `contentMetadataViewModel`）
+
 ### googletrends
 
 Google Trends 趋势查询，返回 `{ tab_id, trend[], top[], rising[] }`：
@@ -223,6 +241,7 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
 ├── redditsearch.rs   # Reddit 搜索（选择器 + 编排）
 ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
 ├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
+├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
 └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
@@ -245,7 +264,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
 - 每个 agent（`mcp-` 身份）自动拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；
 - 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

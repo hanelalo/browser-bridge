@@ -114,7 +114,7 @@ cd extension && pnpm install && pnpm build
 claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bridge-mcp
 ```
 
-配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`googletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
+配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`youtuberinfo`、`googletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
 
 ## 可用工具
 
@@ -204,6 +204,28 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 ```json
 { "url": "https://www.youtube.com/watch?v=rQ_J9WH6CGk" }
 ```
+
+#### youtuberinfo
+
+获取指定 YouTube 频道（youtuber）的视频列表：频道名、订阅数、视频名称/URL/观看数/时长/发布时间。直接解析频道 `/videos` 页 HTML 内嵌的 `ytInitialData`（首屏即含完整视频网格），不足 `max` 条时用页面里的 InnerTube API key/context 通过 `browse` continuation 续取（与 yt-dlp 同源）。**不依赖页面渲染与窗口可见性**：标签页在后台或被全屏应用遮挡时也照常拿满，不弹窗、不抢焦点、不用手动切过去。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `channel` | string | ✔ | — | 频道 URL（如 `https://www.youtube.com/@handle/videos`）或 handle（如 `@handle`；`/c/`、`/user/`、`/channel/UC...` 路径形式均可） |
+| `max` | int | — | `10` | 最多返回视频条数（至少 1） |
+| `tab_id` | int | — | 当前激活页 | 目标标签页 |
+
+返回：`{ "tab_id": int, "channel": { "name", "url", "subscriber_count", "subscriber_count_text" }, "videos": [ { "title", "url", "views", "views_count", "duration", "published", "target" } ] }`。`subscriber_count` / `views_count` 为解析后的整数（`万`/`亿`/`K`/`M` 缩写会换算），`*_text` / `views` 为页面原始文本（如 `2.34万位订阅者` / `1.2万次观看`）；`duration` / `published` 为原始文本（如 `12:34` / `2 months ago`）；每条的 `target` 可直接喂给 `click` 打开视频。
+
+示例：
+
+```json
+{ "channel": "https://www.youtube.com/@xiaojunpodcast/videos", "max": 10 }
+```
+
+注意：订阅数同时兼容新旧版频道页结构；若页面数据缺失（如频道不存在 / 验证墙 / consent 页）会返回明确错误提示。
 
 #### googletrends
 

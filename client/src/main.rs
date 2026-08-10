@@ -9,6 +9,7 @@ use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
+use bridge_core::recipes::youtuberinfo::youtuberinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
 use bridge_core::transport::Bridge;
@@ -108,6 +109,17 @@ enum Cmd {
     Youtubeinfo {
         /// 视频 URL 或 11 位视频 ID（watch?v= / youtu.be / shorts / embed / live 均可）
         url: String,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
+    /// 获取指定 YouTube 频道（youtuber）的视频列表（频道名、订阅数、视频名称/URL/观看数/时长/发布时间）
+    Youtuberinfo {
+        /// 频道 URL（如 https://www.youtube.com/@handle/videos）或 handle（如 @handle）
+        channel: String,
+        /// 最多返回的视频条数（默认 10；至少 1）
+        #[arg(long, default_value_t = 10)]
+        max: usize,
         /// 指定标签页 id（默认当前激活标签页）
         #[arg(long)]
         tab: Option<i32>,
@@ -407,6 +419,23 @@ async fn main() {
                 }
             };
             match youtubeinfo(&mut bridge, &url, tab).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::Youtuberinfo { channel, max, tab } => {
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match youtuberinfo(&mut bridge, &channel, max, tab).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
