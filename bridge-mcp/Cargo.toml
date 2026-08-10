@@ -6,6 +6,7 @@ description = "Browser Bridge MCP server：把浏览器指令暴露为 MCP tools
 
 [dependencies]
 bridge-core = { path = "../bridge-core" }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rmcp = { version = "3.1.0", features = ["schemars", "transport-io"] }
 schemars = { version = "1.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

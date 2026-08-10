@@ -126,6 +126,7 @@ name = "bridge-mcp"
 version = "0.1.0"
 dependencies = [
  "bridge-core",
+ "futures-util",
  "rmcp",
  "schemars",
  "serde",

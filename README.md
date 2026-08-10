@@ -242,6 +242,9 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
+- Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
+- 每个 agent（`mcp-` 身份）自动拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；
+- 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
 - 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
@@ -274,7 +277,7 @@ Cursor（`.cursor/mcp.json`）：
 }
 ```
 
-前提：浏览器已加载扩展（`chrome://extensions` 加载 `extension/dist/chrome-mv3`）。MCP 首次调用会自动拉起 bridge-server，扩展会在几秒内自动重连，无需手动启动任何进程。
+前提：Chrome 里已加载扩展（`chrome://extensions` 加载 `extension/dist/chrome-mv3`）。Chrome 没开也没关系——MCP 首次调用会自动拉起默认 Chrome 和 bridge-server，扩展会自动连上，无需手动启动任何进程。
 
 ## 构建产物（发布）
 
@@ -332,6 +335,7 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 | 插件连接地址 | `ws://127.0.0.1:9225` | 构建时 `WXT_PUBLIC_BRIDGE_URL=ws://... pnpm build` |
 | client 服务地址 | `ws://127.0.0.1:9225` | `--server` 或环境变量 `BRIDGE_SERVER` |
 | client 自动拉起 | 已构建的 `bridge-server` | `BRIDGE_SERVER_BIN` 指定路径，否则按同目录 / target / PATH 查找 |
+| MCP 关闭拉起的 Chrome 空闲时间 | 600（10 分钟） | `BRIDGE_CLOSE_CHROME_IDLE_SECS`（秒）；server 断开或 MCP 会话结束时也会关闭自己拉起的 Chrome |
 | Chrome 版本 | 120+ | `run_script` 需要 `chrome.userScripts`（135+ 体验最佳） |
 
 ## 安全说明

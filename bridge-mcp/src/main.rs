@@ -3,8 +3,9 @@
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
@@ -14,7 +15,8 @@ use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
-use bridge_core::transport::Bridge;
+use bridge_core::transport::{connect_bridge_no_spawn, Bridge};
+use futures_util::StreamExt;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData};
 use rmcp::tool_handler;
@@ -26,6 +28,17 @@ use tokio::sync::Mutex;
 
 const DEFAULT_SERVER: &str = "ws://127.0.0.1:9225";
 const NO_EXTENSION_ERR: &str = "no extension connected";
+/// 空闲多久关闭本进程拉起的 Chrome（可被 BRIDGE_CLOSE_CHROME_IDLE_SECS 覆盖，便于测试）
+const IDLE_CLOSE_CHROME_SECS: u64 = 600;
+const WATCHDOG_TICK_SECS: u64 = 30;
+
+/// 本进程是否拉起了 Chrome（只在启动前 Chrome 未运行时置 true，之后只关自己拉起的）。
+static LAUNCHED_CHROME: AtomicBool = AtomicBool::new(false);
+static LAST_ACTIVITY: OnceLock<StdMutex<Instant>> = OnceLock::new();
+
+fn last_activity() -> &'static StdMutex<Instant> {
+    LAST_ACTIVITY.get_or_init(|| StdMutex::new(Instant::now()))
+}
 
 #[derive(Clone)]
 struct BridgeMcp {
@@ -302,6 +315,7 @@ async fn call(
     method: &str,
     params: Value,
 ) -> Result<CallToolResult, ErrorData> {
+    *last_activity().lock().unwrap() = Instant::now();
     let mut b = bridge.lock().await;
     match b.request(id, method, params.clone()).await {
         Ok(v) => return ok(v),
@@ -370,6 +384,7 @@ fn ensure_chrome_running() -> Result<(), String> {
         .map_err(|e| format!("拉起 Chrome 失败: {e}"))?;
     if status.success() {
         eprintln!("[bridge-mcp] open returned success");
+        LAUNCHED_CHROME.store(true, Ordering::SeqCst);
         Ok(())
     } else {
         eprintln!("[bridge-mcp] open returned failure");
@@ -389,10 +404,28 @@ fn ensure_chrome_running() -> Result<(), String> {
             .spawn()
             .is_ok()
         {
+            LAUNCHED_CHROME.store(true, Ordering::SeqCst);
             return Ok(());
         }
     }
     Err("拉起 Chrome 失败：未在 PATH 中找到 chrome/chromium".to_string())
+}
+
+/// 优雅退出 Chrome（会话保留，下次启动恢复）。只在确认是本进程拉起的 Chrome 时调用。
+#[cfg(target_os = "macos")]
+fn quit_chrome() {
+    let _ = Command::new("osascript")
+        .args(["-e", "quit app \"Google Chrome\""])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quit_chrome() {
+    for bin in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"] {
+        let _ = Command::new("pkill").args(["-x", bin]).status();
+    }
 }
 
 fn with_target(
@@ -812,7 +845,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bridge: Arc::new(Mutex::new(bridge)),
         client_id,
     };
+
+    // Chrome 生命周期管理：只关本进程拉起的 Chrome。
+    // 1) server 断开（server 退出/被杀）：本进程拉起的 Chrome 一并退出
+    // 2) 空闲超时（默认 10 分钟）：退出本进程拉起的 Chrome
+    // 3) MCP 会话结束（stdio 关闭）：main 末尾清理
+    {
+        let server_watch = server.clone();
+        let watch_client = format!("mcp-watch-{}", std::process::id());
+        tokio::spawn(async move {
+            loop {
+                match connect_bridge_no_spawn(&server_watch, &watch_client).await {
+                    Ok(mut ws) => {
+                        // 一直读到断开：server 退出/被杀时流结束
+                        while let Some(_msg) = ws.next().await {}
+                        eprintln!("[bridge-mcp] bridge server closed");
+                        if LAUNCHED_CHROME.swap(false, Ordering::SeqCst) {
+                            eprintln!("[bridge-mcp] closing Chrome launched by this MCP process");
+                            quit_chrome();
+                        }
+                    }
+                    Err(_) => {
+                        // server 没在运行，无需处理
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(WATCHDOG_TICK_SECS)).await;
+                if !LAUNCHED_CHROME.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let idle_secs = std::env::var("BRIDGE_CLOSE_CHROME_IDLE_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(IDLE_CLOSE_CHROME_SECS);
+                if last_activity().lock().unwrap().elapsed() >= Duration::from_secs(idle_secs) {
+                    eprintln!("[bridge-mcp] idle {idle_secs}s, closing Chrome launched by this MCP process");
+                    quit_chrome();
+                    LAUNCHED_CHROME.store(false, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+
     let service = mcp.serve(rmcp::transport::stdio()).await?;
-    service.waiting().await?;
+    let waiting = service.waiting().await;
+    // MCP 会话结束（stdio 关闭）：关掉本进程拉起的 Chrome
+    if LAUNCHED_CHROME.swap(false, Ordering::SeqCst) {
+        eprintln!("[bridge-mcp] MCP session ended, closing Chrome launched by this MCP process");
+        quit_chrome();
+    }
+    waiting?;
     Ok(())
 }

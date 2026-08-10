@@ -100,6 +100,18 @@ pub async fn connect_bridge(server: &str, client_id: &str) -> Result<BridgeStrea
     }
 }
 
+/// 连接 server 并完成 hello 握手；**不自动拉起 server**。
+/// 用于后台监听类连接（如检测 server 退出），避免把已退出的 server 又拉起来。
+pub async fn connect_bridge_no_spawn(
+    server: &str,
+    client_id: &str,
+) -> Result<BridgeStream, String> {
+    let (ws, _) = connect_async(server)
+        .await
+        .map_err(|e| format!("无法连接 {server}: {e}"))?;
+    finish_hello(ws, client_id).await
+}
+
 /// 完成 hello 握手。
 async fn finish_hello(mut ws: BridgeStream, client_id: &str) -> Result<BridgeStream, String> {
     ws.send(Message::Text(

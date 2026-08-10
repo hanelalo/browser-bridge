@@ -14,10 +14,15 @@ Claude / Cursor / Codex 等 agent
    bridge-server（Rust 枢纽，127.0.0.1:9225，空闲 120s 自动退出）
         │  WebSocket
         ▼
-   Chrome 扩展（Browser Bridge，安装在浏览器里执行指令）
+   Chrome 扩展（Browser Bridge；每个 agent 自动拥有独立专用窗口）
 ```
 
 所有组件都是本地进程：扩展在浏览器里，其余跑在你自己机器上，浏览器页面数据不出本机。
+
+两个开箱即用的行为：
+
+- **Chrome 没在运行也能用**：工具调用发现扩展未连接时，`bridge-mcp` 会自动拉起默认 Chrome（共享你的 profile），等扩展连上后重试（最长约 30 秒），无需手动开浏览器。
+- **agent 不抢你的窗口**：每个 `bridge-mcp` 进程（`mcp-` 身份）首次需要时会自动新建一个**专用浏览器窗口**，之后它的标签页都开在这个窗口里，不带 `tab_id` 的操作默认落在该窗口，不会动你正在看的窗口，也不会抢焦点。
 
 ## 从零开始
 
@@ -272,9 +277,22 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 ## 多 agent / 多客户端使用
 
 - 每个 `bridge-mcp` 进程启动时生成独立身份（`mcp-<pid>-<nanos>`）
+- 每个身份对应一个**独立浏览器窗口**：首次需要时惰性创建（`focused: false`），之后复用；`list_tabs` 等只读调用不会创建
+- 不带 `tab_id` 的操作默认落在该 agent 专用窗口的激活页；`new_tab` / `click --new-tab` 也开在专用窗口里
+- `activate_tab` 对专用窗口内的标签页只切换标签、不聚焦窗口（手动指定的普通窗口仍会聚焦）
 - `new_tab` / `click --new-tab` 创建的标签页会记录创建者；`close_auto_tabs` **只清理本进程创建的标签页**，不会误关其他 agent 正在用的
 - CLI 的 `close-auto-tabs` 是人工管理入口，清理全部自动标签页
 - 多个 agent 可以同时连同一个 server（请求 id 唯一，不会串线）
+
+## Chrome 生命周期（谁拉起的、何时关闭）
+
+`bridge-mcp` 只在确认"启动前 Chrome 未在运行、由本进程拉起"时接管关闭，**不会关闭你自己开的 Chrome**。满足以下任一条件时，会优雅退出（`osascript quit`，会话保留，下次打开恢复标签页）它拉起的 Chrome：
+
+- **空闲超时**：默认 10 分钟没有工具调用（可用 `BRIDGE_CLOSE_CHROME_IDLE_SECS` 覆盖，单位秒）
+- **bridge-server 关闭/断开**：MCP 进程保持存活，下次调用会自动重建 server 并按需重新拉起 Chrome
+- **MCP 会话结束**：stdio 关闭（宿主结束会话）时随进程退出一起关闭
+
+注意：多 agent 场景下，"自己拉起的"按进程判断——agent A 拉起的 Chrome 如果 agent B 还在用，A 的关闭逻辑会一并退出它。
 
 ## 常见问题
 
@@ -289,7 +307,7 @@ Chrome 138+ 需要在扩展详情页打开「允许用户脚本」开关（见�
 **agent 说连不上 / 工具调用超时**
 
 - 确认扩展已加载且「允许用户脚本」已开
-- 浏览器保持打开（agent 操控的就是你正在看的这个浏览器）
+- Chrome 没在运行也没关系：首次工具调用会自动拉起默认 Chrome 并等待扩展连上（最长约 30 秒）
 - 首次调用会自动拉起 server，稍等几秒重试
 - 换端口：`BRIDGE_SERVER=ws://127.0.0.1:9226` 环境变量（server 端用 `BRIDGE_PORT`）
 
