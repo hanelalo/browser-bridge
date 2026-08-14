@@ -365,3 +365,9 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 - 插件声明了 `host_permissions: <all_urls>` 才能操作任意页面——这是个人工具的便利；如果要对外分发，应改成按站点授权。
 - 服务端目前接受任意角色的连接；如需更强隔离，可在握手阶段加 token。
 - `run_script` / `scrape` 可以读写页面，属于强能力；不要把它暴露给不可信来源。
+
+## License
+
+本项目使用 [MIT License](LICENSE) 开源。Copyright (c) 2026 hanelalo。
+
+你可以自由使用、修改、分发本项目（含商用），但需保留版权声明和许可协议原文。本项目按 "AS IS" 提供，不附带任何明示或默示的担保。
