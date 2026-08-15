@@ -342,6 +342,18 @@ enum Cmd {
         #[arg(long)]
         tab: Option<i32>,
     },
+    /// 读取页面 a11y tree（可交互节点带 target，可直接喂给 click / set_value 等指令）
+    GetA11yTree {
+        /// 是否包含隐藏元素（默认 false）
+        #[arg(long)]
+        include_hidden: bool,
+        /// 最多返回节点数（默认 500，范围 10-5000）
+        #[arg(long = "max-nodes", default_value_t = 500)]
+        max_nodes: usize,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
 }
 
 #[tokio::main]
@@ -663,6 +675,17 @@ async fn main() {
                 params["full"] = json!(true);
             }
             ("get_page_markdown", params)
+        }
+        Cmd::GetA11yTree {
+            include_hidden,
+            max_nodes,
+            tab,
+        } => {
+            let mut params = json!({ "tab_id": tab, "max_nodes": max_nodes });
+            if include_hidden {
+                params["include_hidden"] = json!(true);
+            }
+            ("get_a11y_tree", params)
         }
     };
 

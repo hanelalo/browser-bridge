@@ -55,6 +55,7 @@ cargo run -- youtuberinfo '@xiaojunpodcast' --max 20
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 cargo run -- get-page-markdown --url https://example.com
+cargo run -- get-a11y-tree
 ```
 
 ### 指令速查表
@@ -80,6 +81,7 @@ cargo run -- get-page-markdown --url https://example.com
 | `run-script '<js>'` | 页面里执行任意 JS，返回 JSON |
 | `get-page-content` | 读取页面标题/URL/文本 |
 | `get-page-markdown [--url <url>] [--selector <css>] [--full]` | 把页面内容转换成标准 Markdown（默认自动提取正文，去掉导航/页脚等噪音） |
+| `get-a11y-tree [--include-hidden] [--max-nodes <n>]` | 读取页面 a11y tree，可交互节点（按钮/链接/输入框等）带 `target` 可直接喂给 `click` / `set_value` |
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 | `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
@@ -125,6 +127,26 @@ cargo run -- get-page-markdown --selector '#content' --tab 7    # 指定标签�
 - 默认行为：用 Readability 自动提取主内容（去掉导航 / 页脚 / 相关文章等噪音），提取不到或内容过少时退回整页转换。
 - `--selector`：可选，只转换匹配该 CSS 选择器的容器（如 `article` / `#content`），优先级最高。
 - `--full`：可选，跳过正文自动提取，转换整个页面。
+
+### get-a11y-tree
+
+读取页面 a11y tree（无障碍树），返回 `{ tab_id, title, url, count, nodes[] }`。适合需要与页面交互（点击 / 填表 / 选择 / 勾选）前先了解页面结构、找出可交互元素的场景——比 `get-page-content` 的纯文本更能回答"页面上有什么按钮、输入框、下拉框"：
+
+```sh
+cargo run -- get-a11y-tree
+cargo run -- get-a11y-tree --max-nodes 1000   # 大页面放宽上限
+cargo run -- get-a11y-tree --include-hidden    # 连隐藏元素一起返回
+```
+
+`nodes` 是扁平节点列表，每项含 `role`（无障碍角色）/ `name`（可访问名称）/ `value`（当前值）/ `states`（enabled / disabled / checked / expanded 等）/ `depth`（DOM 深度）/ `tag`；可交互节点额外带 `target`，可直接喂给 `click` / `set_value` / `check` / `select_option` / `clear` / `get_value`：
+
+```sh
+cargo run -- click '#submit'              # target 直接可用
+```
+
+- `--include-hidden`：可选，默认只返回可见元素；开启后包含 `hidden` / `display:none` / `visibility:hidden` / `aria-hidden` 的元素。
+- `--max-nodes`：可选，最多返回节点数（默认 500，范围 10-5000），防止大页面输出过大。
+- 角色与名称优先用 Chrome 的 `computedRole` / `computedName`（Chrome 135+），低版本自动回退到标签/属性推断；只遍历 light DOM，不穿透 iframe 与 shadow DOM（与元素定位行为一致）。
 
 ### googlesearch
 
@@ -266,7 +288,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
 - 每个 agent（`mcp-` 身份）自动拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；
 - 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

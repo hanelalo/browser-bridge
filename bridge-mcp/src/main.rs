@@ -314,6 +314,18 @@ struct GetPageMarkdownParams {
     tab_id: Option<i32>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct A11yTreeParams {
+    /// 是否包含隐藏元素（hidden / display:none / visibility:hidden / aria-hidden，默认 false）
+    #[serde(default)]
+    include_hidden: Option<bool>,
+    /// 最多返回节点数（默认 500，范围 10-5000）
+    #[serde(default)]
+    max_nodes: Option<usize>,
+    #[serde(default)]
+    tab_id: Option<i32>,
+}
+
 // ---------- 工具辅助 ----------
 
 fn ok(value: Value) -> Result<CallToolResult, ErrorData> {
@@ -704,6 +716,19 @@ impl BridgeMcp {
             v["full"] = json!(true);
         }
         call(&self.bridge, "gpm", "get_page_markdown", v).await
+    }
+
+    #[tool(name = "get_a11y_tree", description = "读取页面 a11y tree（无障碍树），返回 { tab_id, title, url, count, nodes[] }。每个节点含 role（角色）/ name（可访问名称）/ value（当前值）/ states（状态：enabled/disabled/checked/unchecked/expanded/collapsed/required/readonly 等）/ depth（DOM 深度）/ tag；heading 额外带 level。可交互节点（button/link/textbox/searchbox/checkbox/radio/combobox/listbox/slider/select 等）带 target，可直接喂给 click / set_value / check / select_option / clear / get_value。适合与页面交互前先了解页面结构、找出可点击或可填写的元素")]
+    pub async fn get_a11y_tree(
+        &self,
+        params: Parameters<A11yTreeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut v = json!({ "tab_id": p.tab_id, "max_nodes": p.max_nodes.unwrap_or(500) });
+        if p.include_hidden.unwrap_or(false) {
+            v["include_hidden"] = json!(true);
+        }
+        call(&self.bridge, "a11y", "get_a11y_tree", v).await
     }
 
     #[tool(name = "googlesearch", description = "Google 搜索，返回 { tab_id, results[] }（title/description/url/target）")]

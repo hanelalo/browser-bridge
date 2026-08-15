@@ -269,6 +269,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `navigate` | 导航到指定 URL 并等待加载完成 | `url`（必填）、`tab_id` |
 | `get_page_content` | 读取页面标题 / URL / 文本 | `tab_id` |
 | `get_page_markdown` | 把页面内容转换为标准 Markdown（默认自动提取正文） | `url`、`selector`、`full`、`tab_id` |
+| `get_a11y_tree` | 读取页面 a11y tree（无障碍树），可交互节点带 `target` 可直接喂给 `click` / `set_value` 等 | `include_hidden`、`max_nodes`（默认 500）、`tab_id` |
 | `scrape` | 按 CSS 选择器提取结构化数据 | `item`（必填，结果容器选择器）、`fields`（字段映射：`字段名: "选择器[@属性]"`）、`title` / `link` / `desc`、`timeout`、`tab_id` |
 | `run_script` | 在页面执行任意 JS 表达式，返回 JSON 序列化结果 | `code`（必填）、`tab_id` |
 | `click` | 点击匹配定位的元素 | `target`（必填）、`by`、`index`、`timeout`（默认 5000ms）、`new_tab`（锚点在新标签页打开，默认 false）、`tab_id` |
@@ -295,6 +296,30 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `tab_id` | int | — | 当前激活页 | 目标标签页 |
 
 返回：`{ "tab_id": int, "title": string, "url": string, "markdown": string }`。
+
+#### get_a11y_tree
+
+读取页面 a11y tree（无障碍树），适合需要与页面交互（点击 / 填表 / 选择 / 勾选）前先了解页面结构、找出可点击或可填写的元素的场景。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `include_hidden` | boolean | — | `false` | 是否包含隐藏元素（`hidden` / `display:none` / `visibility:hidden` / `aria-hidden`） |
+| `max_nodes` | int | — | `500` | 最多返回节点数（范围 10-5000），防止大页面输出过大 |
+| `tab_id` | int | — | 当前激活页 | 目标标签页 |
+
+返回：`{ "tab_id": int, "title": string, "url": string, "count": int, "nodes": [...] }`。`nodes` 为扁平节点列表，每项含 `role`（无障碍角色）/ `name`（可访问名称）/ `value`（输入类当前值，select 为选中项文本，无则 `null`）/ `states`（`enabled` / `disabled` / `checked` / `unchecked` / `expanded` / `collapsed` / `required` / `readonly` / `selected` 等）/ `depth`（DOM 深度，可还原树形）/ `tag`；heading 额外带 `level`。**可交互节点**（button / link / textbox / searchbox / checkbox / radio / combobox / listbox / slider 等）带 `target`，可直接喂给 `click` / `set_value` / `check` / `select_option` / `clear` / `get_value`。
+
+角色与名称优先用 Chrome 的 `computedRole` / `computedName`（Chrome 135+），低版本自动回退到标签/属性推断；只遍历 light DOM，不穿透 iframe 与 shadow DOM（与元素定位行为一致）。
+
+示例（配合交互）：
+
+```
+1. get_a11y_tree → 找到 role=textbox、name=用户名 的节点，取其 target
+2. set_value → target 填上一步的 target，value 填用户输入
+3. get_a11y_tree（可选，验证）或 click 提交按钮
+```
 
 ## 多 agent / 多客户端使用
 

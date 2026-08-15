@@ -274,6 +274,8 @@ async function execute(
       return getPageContent(params, clientId);
     case 'get_page_markdown':
       return getPageMarkdown(params, clientId);
+    case 'get_a11y_tree':
+      return getA11yTree(params, clientId);
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -678,6 +680,319 @@ function pageMarkdownOp(params: Record<string, unknown>): unknown {
     return { __bridge_error: 'page-markdown script not injected' };
   }
   return fn(params);
+}
+
+/** 读取页面 a11y tree：注入 a11yTreeOp 到目标标签页运行，返回扁平节点列表。 */
+async function getA11yTree(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  if (tab.id == null) throw new Error('tab has no id');
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: a11yTreeOp,
+    args: [params],
+  });
+  const r = (result?.result ?? {}) as {
+    __bridge_error?: string;
+    count?: number;
+    nodes?: unknown[];
+  };
+  if (r.__bridge_error) throw new Error(r.__bridge_error);
+  const tabInfo = await chrome.tabs.get(tab.id);
+  return {
+    tab_id: tab.id,
+    title: tabInfo.title ?? '',
+    url: tabInfo.url ?? '',
+    count: r.count ?? 0,
+    nodes: r.nodes ?? [],
+  };
+}
+
+/**
+ * 页面内 a11y tree 生成器：注入到目标标签页运行（chrome.scripting 只序列化函数自身，
+ * 所有辅助逻辑必须内联在这里）。返回扁平节点列表：每个节点含 role / name / value /
+ * states / depth / tag；可交互节点（button / link / textbox / combobox / checkbox 等）
+ * 额外带 target（css 选择器），可直接喂给 click / set_value / check / select_option 等指令。
+ * 与元素定位行为一致：只遍历 light DOM，不穿透 iframe 与 shadow DOM。
+ */
+function a11yTreeOp(params: Record<string, unknown>): unknown {
+  try {
+    const includeHidden = params.include_hidden === true;
+    let maxNodes = Number(params.max_nodes ?? 500);
+    if (!Number.isFinite(maxNodes)) maxNodes = 500;
+    maxNodes = Math.max(10, Math.min(5000, Math.floor(maxNodes)));
+
+    const SKIP_TAGS = new Set([
+      'script',
+      'style',
+      'noscript',
+      'template',
+      'head',
+      'meta',
+      'link',
+      'title',
+    ]);
+    const ACTIONABLE = new Set([
+      'button',
+      'link',
+      'textbox',
+      'searchbox',
+      'checkbox',
+      'radio',
+      'combobox',
+      'listbox',
+      'slider',
+      'spinbutton',
+      'tab',
+      'menuitem',
+      'menuitemcheckbox',
+      'menuitemradio',
+      'switch',
+      'option',
+      'summary',
+      'treeitem',
+      'scrollbar',
+    ]);
+    // 名称可以从自身文本推导的角色（其余角色用直接文本节点，避免把整棵子树文本当名称）
+    const CONTENT_NAMED = new Set([
+      'button',
+      'link',
+      'heading',
+      'summary',
+      'menuitem',
+      'menuitemcheckbox',
+      'menuitemradio',
+      'tab',
+      'treeitem',
+      'option',
+      'listitem',
+      'switch',
+      'checkbox',
+      'radio',
+      'searchbox',
+      'textbox',
+    ]);
+
+    const ownText = (el: Element): string =>
+      Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent ?? '')
+        .join('')
+        .trim();
+
+    const cssEscape = (s: string): string =>
+      typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+        ? CSS.escape(s)
+        : s.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+
+    /** 无障碍角色：优先 Chrome 135+ 的 computedRole，低版本回退到标签/属性推断。 */
+    const roleOf = (el: Element): string => {
+      const computed = (el as unknown as { computedRole?: unknown }).computedRole;
+      if (typeof computed === 'string' && computed && computed !== 'none' && computed !== 'generic') {
+        return computed;
+      }
+      const tag = el.tagName.toLowerCase();
+      if (el instanceof HTMLAnchorElement) return el.hasAttribute('href') ? 'link' : 'generic';
+      if (tag === 'button') return 'button';
+      if (tag === 'textarea') return 'textbox';
+      if (tag === 'select') return el.hasAttribute('multiple') ? 'listbox' : 'combobox';
+      if (tag === 'img') return el.getAttribute('alt') === '' ? 'presentation' : 'img';
+      if (/^h[1-6]$/.test(tag)) return 'heading';
+      if (tag === 'ul' || tag === 'ol') return 'list';
+      if (tag === 'li') return 'listitem';
+      if (tag === 'nav') return 'navigation';
+      if (tag === 'main') return 'main';
+      if (tag === 'header') return 'banner';
+      if (tag === 'footer') return 'contentinfo';
+      if (tag === 'aside') return 'complementary';
+      if (tag === 'form') return 'form';
+      if (tag === 'table') return 'table';
+      if (tag === 'tr') return 'row';
+      if (tag === 'td') return 'cell';
+      if (tag === 'th') return 'columnheader';
+      if (tag === 'dialog') return 'dialog';
+      if (tag === 'summary') return 'button';
+      if (tag === 'input') {
+        const t = (el as HTMLInputElement).type;
+        if (t === 'checkbox') return 'checkbox';
+        if (t === 'radio') return 'radio';
+        if (t === 'range') return 'slider';
+        if (t === 'number') return 'spinbutton';
+        if (t === 'button' || t === 'submit' || t === 'reset' || t === 'image') return 'button';
+        if (t === 'hidden') return 'none';
+        if (t === 'search') return 'searchbox';
+        return 'textbox';
+      }
+      return 'generic';
+    };
+
+    /** 可访问名称：优先 computedName，回退 aria-label / aria-labelledby / alt / title / placeholder / 文本。 */
+    const nameOf = (el: Element, role: string): string => {
+      const computed = (el as unknown as { computedName?: unknown }).computedName;
+      if (typeof computed === 'string' && computed.trim()) return computed.trim().slice(0, 200);
+      const ariaLabel = el.getAttribute('aria-label');
+      if (ariaLabel) return ariaLabel.trim().slice(0, 200);
+      const labelledBy = el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const parts = labelledBy
+          .split(/\s+/)
+          .map((id) => document.getElementById(id)?.textContent?.trim() ?? '')
+          .filter(Boolean);
+        if (parts.length > 0) return parts.join(' ').slice(0, 200);
+      }
+      const alt = el.getAttribute('alt');
+      if (alt) return alt.trim().slice(0, 200);
+      const title = el.getAttribute('title');
+      if (title) return title.trim().slice(0, 200);
+      const placeholder = el.getAttribute('placeholder');
+      if (placeholder) return placeholder.trim().slice(0, 200);
+      const text = CONTENT_NAMED.has(role) ? (el.textContent ?? '').trim() : ownText(el);
+      return text ? text.slice(0, 200) : '';
+    };
+
+    const valueOf = (el: Element): string | null => {
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        const input = el as HTMLInputElement;
+        if (input.type === 'checkbox' || input.type === 'radio') return null;
+        return input.value || null;
+      }
+      if (el instanceof HTMLSelectElement) {
+        return el.selectedOptions[0]?.text.trim() || null;
+      }
+      const ariaValue = el.getAttribute('aria-valuetext') ?? el.getAttribute('aria-valuenow');
+      return ariaValue || null;
+    };
+
+    const statesOf = (el: Element): string[] => {
+      const states: string[] = [];
+      const input = el as HTMLInputElement;
+      if (el instanceof HTMLInputElement) {
+        if (input.disabled) states.push('disabled');
+        if (input.required) states.push('required');
+        if (input.readOnly) states.push('readonly');
+        if (input.type === 'checkbox' || input.type === 'radio') {
+          states.push(input.checked ? 'checked' : 'unchecked');
+        }
+      } else if (el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
+        if ((el as HTMLSelectElement).disabled) states.push('disabled');
+        if ((el as HTMLSelectElement).required) states.push('required');
+        if ((el as HTMLTextAreaElement).readOnly) states.push('readonly');
+      } else {
+        if (el.getAttribute('disabled') != null) states.push('disabled');
+        const map: Record<string, string> = {
+          'aria-disabled': 'disabled',
+          'aria-expanded': 'expanded',
+          'aria-checked': 'checked',
+          'aria-selected': 'selected',
+          'aria-pressed': 'pressed',
+          'aria-required': 'required',
+          'aria-readonly': 'readonly',
+          'aria-hidden': 'aria-hidden',
+        };
+        for (const [attr, state] of Object.entries(map)) {
+          const v = el.getAttribute(attr);
+          if (v === 'true') states.push(state);
+          else if (attr === 'aria-expanded' && v === 'false') states.push('collapsed');
+          else if (attr === 'aria-checked' && v === 'false') states.push('unchecked');
+        }
+      }
+      if (!states.includes('disabled')) states.unshift('enabled');
+      return states;
+    };
+
+    /** 生成可直接喂给 click / set_value 的 css 选择器：优先唯一 id，其次唯一 tag.class，最后 nth-of-type 路径。 */
+    const uniqueSelector = (el: Element): string | null => {
+      if (el.id) {
+        const sel = `#${cssEscape(el.id)}`;
+        try {
+          if (document.querySelectorAll(sel).length === 1) return sel;
+        } catch {
+          // 非法选择器（罕见），继续尝试其他方式
+        }
+      }
+      if (el instanceof HTMLElement && typeof el.className === 'string' && el.className.trim()) {
+        const classes = el.className
+          .trim()
+          .split(/\s+/)
+          .slice(0, 3)
+          .map((c) => `.${cssEscape(c)}`);
+        const sel = `${el.tagName.toLowerCase()}${classes.join('')}`;
+        try {
+          if (document.querySelectorAll(sel).length === 1) return sel;
+        } catch {
+          // ignore
+        }
+      }
+      const parts: string[] = [];
+      let node: Element | null = el;
+      while (node && node.parentElement && node !== document.body) {
+        const parent = node.parentElement;
+        const tag = node.tagName.toLowerCase();
+        let nth = 1;
+        for (const sib of parent.children) {
+          if (sib === node) break;
+          if (sib.tagName === node.tagName) nth += 1;
+        }
+        parts.unshift(`${tag}:nth-of-type(${nth})`);
+        node = parent;
+      }
+      return parts.length > 0 ? parts.join(' > ') : null;
+    };
+
+    const isHidden = (el: Element): boolean => {
+      if ((el as HTMLElement).hidden) return true;
+      if (el.getAttribute('aria-hidden') === 'true') return true;
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return true;
+      return false;
+    };
+
+    const nodes: Array<Record<string, unknown>> = [];
+
+    const walk = (root: Element, depth: number, ancestorHidden: boolean): void => {
+      for (const child of Array.from(root.children)) {
+        if (nodes.length >= maxNodes) return;
+        const el = child as Element;
+        const tag = el.tagName.toLowerCase();
+        if (SKIP_TAGS.has(tag)) continue;
+
+        const hidden = ancestorHidden || isHidden(el);
+        // 隐藏子树的节点全都不可见，直接整棵跳过
+        if (hidden && !includeHidden) continue;
+
+        const role = roleOf(el);
+        if (role !== 'generic' && role !== 'none' && role !== 'presentation' && role !== 'text') {
+          // 收起状态的 <select> 的 option 不渲染（无盒），跳过避免噪音
+          if (role === 'option' && !includeHidden && el.getClientRects().length === 0) {
+            walk(el, depth + 1, hidden);
+            continue;
+          }
+          const node: Record<string, unknown> = {
+            role,
+            name: nameOf(el, role),
+            value: valueOf(el),
+            states: statesOf(el),
+            depth,
+            tag,
+          };
+          if (role === 'heading') {
+            const lv = Number(el.getAttribute('aria-level'));
+            node.level = Number.isInteger(lv) && lv > 0 ? lv : parseInt(tag.slice(1), 10) || 1;
+          }
+          if (ACTIONABLE.has(role)) {
+            node.target = { by: 'css', value: uniqueSelector(el), index: 0 };
+          }
+          nodes.push(node);
+        }
+        walk(el, depth + 1, hidden);
+      }
+    };
+
+    if (!document.body) return { count: 0, nodes: [] };
+    walk(document.body, 0, false);
+    return { count: nodes.length, nodes };
+  } catch (err) {
+    return { __bridge_error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** 关闭标签页（默认当前激活标签页）。 */

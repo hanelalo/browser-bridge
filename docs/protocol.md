@@ -447,6 +447,49 @@ result：
 
 图片与链接会转成绝对 URL；代码块语言从 `language-*` / `lang-*` / `highlight-*` class 或 `data-lang` 识别。
 
+### get_a11y_tree
+
+读取页面 a11y tree（无障碍树），返回扁平节点列表。适合需要与页面交互（点击 / 填表 / 选择 / 勾选）前先了解页面结构、找出可交互元素的场景：每个可交互节点带 `target`，可直接喂给 `click` / `set_value` / `check` / `select_option` / `clear` / `get_value`。
+
+params：
+
+```json
+{
+  "tab_id": 7,
+  "include_hidden": false,
+  "max_nodes": 500
+}
+```
+
+- `tab_id`：可选，目标标签页（默认当前激活页）。
+- `include_hidden`：可选，默认 `false`；为 `true` 时包含隐藏元素（`hidden` / `display:none` / `visibility:hidden` / `aria-hidden`）。
+- `max_nodes`：可选，最多返回节点数，默认 500（范围 10-5000），防止大页面输出过大。
+
+result：
+
+```json
+{
+  "tab_id": 7,
+  "title": "Example",
+  "url": "https://example.com",
+  "count": 42,
+  "nodes": [
+    { "role": "button", "name": "提交", "value": null, "states": ["enabled"], "depth": 3, "tag": "button", "target": { "by": "css", "value": "#submit", "index": 0 } },
+    { "role": "textbox", "name": "用户名", "value": "alice", "states": ["enabled"], "depth": 2, "tag": "input", "target": { "by": "css", "value": "#username", "index": 0 } },
+    { "role": "heading", "name": "文档", "value": null, "states": ["enabled"], "depth": 1, "level": 1, "tag": "h1" }
+  ]
+}
+```
+
+- `role` / `name`：无障碍角色与可访问名称，优先用 Chrome 的 `computedRole` / `computedName`，低版本回退到标签/属性推断。
+- `value`：输入类元素的当前值（select 为选中项文本），无则为 `null`。
+- `states`：状态数组（`enabled` / `disabled` / `checked` / `unchecked` / `expanded` / `collapsed` / `required` / `readonly` / `selected` / `pressed` 等）。
+- `level`：仅 heading 角色，标题层级。
+- `depth`：DOM 深度（可据此还原树形结构）。
+- `target`：仅可交互节点（button / link / textbox / checkbox / radio / combobox / select / slider 等）带定位，可直接喂给 `click` 等指令。
+
+与元素定位行为一致：只遍历 light DOM，不穿透 iframe 与 shadow DOM。
+
 ## 服务端错误
 
 | error | 场景 |
