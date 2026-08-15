@@ -492,6 +492,17 @@ impl BridgeMcp {
         .await
     }
 
+    #[tool(name = "close_agent_window", description = "关闭本会话（当前 MCP 进程）的专用浏览器窗口（连同窗口内所有标签页），释放资源。任务执行完毕后请调用本工具关闭自己的窗口，避免窗口堆积；不影响其他会话的窗口")]
+    pub async fn close_agent_window(&self) -> Result<CallToolResult, ErrorData> {
+        call(
+            &self.bridge,
+            "caw",
+            "close_agent_window",
+            json!({ "owner": self.client_id }),
+        )
+        .await
+    }
+
     #[tool(name = "new_tab", description = "新建标签页（可选打开 URL）")]
     pub async fn new_tab(
         &self,

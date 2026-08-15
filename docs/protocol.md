@@ -118,6 +118,26 @@ result：
 { "closed": [7, 9] }
 ```
 
+### close_agent_window
+
+关闭某个 agent 的专用窗口（连同窗口内所有标签页），释放资源。任务执行完毕后由 agent 调用本方法关闭自己的窗口，避免窗口堆积。
+
+params：
+
+```json
+{ "owner": "mcp-1234-abcd" }
+```
+
+`owner` 可选：指定时只关闭该创建者的专用窗口（多 agent 场景各自隔离）；省略时按连接盖章的 `client_id` 关闭当前会话自己的窗口。
+
+result：
+
+```json
+{ "closed": true, "window_id": 5 }
+```
+
+窗口不存在（未创建过或已被手动关闭）时返回 `{ "closed": false, "window_id": null }`。
+
 ### new_tab
 
 新建标签页，可指定打开 URL。该标签页会被记录为"自动打开的标签页"，可用 `close_auto_tabs` 清理。

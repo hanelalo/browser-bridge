@@ -99,7 +99,7 @@ cargo run -- get-a11y-tree
 
 清理"自动打开的标签页"，需要**单独执行**（CLI 手动调用，或 MCP 流程在收尾时调用一次），不会误关手动打开的标签页。支持**多 agent 隔离**：
 
-- **MCP（`close_auto_tabs` 工具）**：每个 MCP 进程启动时生成独立身份（`mcp-<pid>-<nanos>`），只清理**本进程创建**的标签页，不会误关其他 agent 正在用的标签页
+- **MCP（`close_auto_tabs` 工具）**：每个 MCP 进程启动时生成独立身份（`mcp-<pid>-<nanos>`），只清理**本进程创建**的标签页，不会误关其他 agent 正在用的标签页；任务结束后可再调 `close_agent_window` 关闭自己的专用窗口（连同窗口内标签页一并释放）
 - **CLI（`close-auto-tabs`）**：作为人工管理入口，清理全部自动标签页（不管是谁创建的）
 
 **会被清理的**：`new-tab` 指令和 `click --new-tab` 创建的标签页（扩展记录在 `chrome.storage.session`，service worker 重启不丢）。例如 `googletrends` 每次查询都会新开一个标签页，跑完后清理效果最明显：
@@ -288,7 +288,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
 - 每个 agent（`mcp-` 身份）自动拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；
 - 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

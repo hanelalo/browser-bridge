@@ -253,6 +253,8 @@ async function execute(
       return activateTab(params, clientId);
     case 'close_auto_tabs':
       return closeAutoTabs(params);
+    case 'close_agent_window':
+      return closeAgentWindow(params, clientId);
     case 'navigate':
       return navigate(params, clientId);
     case 'click':
@@ -1020,6 +1022,31 @@ async function closeAutoTabs(params: Record<string, unknown>): Promise<unknown> 
   });
   void saveAutoTabs();
   return { closed };
+}
+
+/** 关闭某个 agent 的专用窗口（连同窗口内所有标签页），释放资源；窗口不存在时返回 closed: false。 */
+async function closeAgentWindow(
+  params: Record<string, unknown>,
+  clientId = '',
+): Promise<unknown> {
+  const owner = typeof params?.owner === 'string' && params.owner ? params.owner : clientId;
+  const windowId = agentWindows.get(owner);
+  if (windowId == null) {
+    return { closed: false, window_id: null };
+  }
+  try {
+    await chrome.windows.get(windowId);
+  } catch {
+    // 窗口已被手动关闭：清记录即可
+    agentWindows.delete(owner);
+    void saveAgentWindows();
+    return { closed: false, window_id: null };
+  }
+  // 窗口内所有标签页会一并关闭；autoTabs 记录由 tabs.onRemoved 监听器逐个清理
+  await chrome.windows.remove(windowId);
+  agentWindows.delete(owner);
+  void saveAgentWindows();
+  return { closed: true, window_id: windowId };
 }
 
 /** 新建标签页（可指定 URL）。 */

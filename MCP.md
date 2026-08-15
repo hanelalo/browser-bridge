@@ -266,6 +266,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `activate_tab` | 切换到指定标签页并聚焦窗口 | `tab_id` |
 | `close_tab` | 关闭标签页（默认当前激活页） | `tab_id` |
 | `close_auto_tabs` | 关闭本会话（当前 MCP 进程）自动打开的标签页（`new_tab` / `click --new-tab` / `googletrends` 创建的），不影响其他会话 | 无 |
+| `close_agent_window` | 关闭本会话的专用浏览器窗口（连同窗口内所有标签页），释放资源；任务执行完毕后调用，不影响其他会话的窗口 | 无 |
 | `navigate` | 导航到指定 URL 并等待加载完成 | `url`（必填）、`tab_id` |
 | `get_page_content` | 读取页面标题 / URL / 文本 | `tab_id` |
 | `get_page_markdown` | 把页面内容转换为标准 Markdown（默认自动提取正文） | `url`、`selector`、`full`、`tab_id` |
@@ -328,6 +329,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 - 不带 `tab_id` 的操作默认落在该 agent 专用窗口的激活页；`new_tab` / `click --new-tab` 也开在专用窗口里
 - `activate_tab` 对专用窗口内的标签页只切换标签、不聚焦窗口（手动指定的普通窗口仍会聚焦）
 - `new_tab` / `click --new-tab` 创建的标签页会记录创建者；`close_auto_tabs` **只清理本进程创建的标签页**，不会误关其他 agent 正在用的
+- 任务执行完毕后调用 `close_agent_window` **关闭自己的专用窗口**（连同窗口内所有标签页），释放资源；不影响其他 agent 的窗口
 - CLI 的 `close-auto-tabs` 是人工管理入口，清理全部自动标签页
 - 多个 agent 可以同时连同一个 server（请求 id 唯一，不会串线）
 
@@ -358,6 +360,6 @@ Chrome 138+ 需要在扩展详情页打开「允许用户脚本」开关（见�
 - 首次调用会自动拉起 server，稍等几秒重试
 - 换端口：`BRIDGE_SERVER=ws://127.0.0.1:9226` 环境变量（server 端用 `BRIDGE_PORT`）
 
-**标签页堆积**
+**标签页 / 窗口堆积**
 
-配方（如 googletrends）每次查询会新开标签页，让 agent 在流程收尾时调用 `close_auto_tabs`；也可以手动用 CLI 执行 `close-auto-tabs` 清场。
+配方（如 googletrends）每次查询会新开标签页，让 agent 在流程收尾时调用 `close_auto_tabs`；也可以手动用 CLI 执行 `close-auto-tabs` 清场。任务结束后调用 `close_agent_window` 关掉自己的专用窗口，窗口和里面的标签页会一并释放。
