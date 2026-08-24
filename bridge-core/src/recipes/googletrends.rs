@@ -115,55 +115,138 @@ fn trends_script(date_spec: &str) -> String {
   const dates = buildDates(DATE_SPEC, values.length);
   const trend = values.map((v, i) => ({{ date: dates[i] || null, value: v }}));
 
-  // --- 关键词表：第一张=热门，第二张=上升；各表自动翻页（最多 10 页，实际一般 5 页 50 条） ---
-  const parseTable = (table) => Array.from(table.querySelectorAll('tbody tr')).map((tr, i) => {{
+  // --- 关键词表：按卡片标题分类（热门/上升/区域），各表自动翻页直到按钮禁用 ---
+  // --- 表格分类：表头定大类，widget 卡片标题细分 top/rising/region，全走元素结构定位 ---
+  const headerOf = (t) => Array.from(t.querySelectorAll('thead th')).map((th) => th.textContent.trim()).join(' ');
+  const isRegionHeader = (t) => /指数和区域|region/i.test(headerOf(t));
+  const isQueryHeader = (t) => !isRegionHeader(t) && /查询|query|term/i.test(headerOf(t));
+  // widget 卡片标题：从表格向上爬，遇到含多张表的容器即视为已爬出卡片
+  const cardTitleOf = (table) => {{
+    let el = table;
+    for (let i = 0; i < 12 && el; i++) {{
+      el = el.parentElement;
+      if (!el) break;
+      if (el.querySelectorAll('table').length > 1) break;
+      const h = Array.from(el.querySelectorAll('h1,h2,h3,h4,[role="heading"]')).map((x) => x.textContent.trim()).find(Boolean);
+      if (h) return h;
+    }}
+    return '';
+  }};
+  const kindOf = (t) => {{
+    if (isRegionHeader(t)) return 'region';
+    if (!isQueryHeader(t)) return null;
+    const title = cardTitleOf(t);
+    if (/上升|rising/i.test(title)) return 'rising';
+    if (/热门|top|most/i.test(title)) return 'top';
+    return 'unknown';
+  }};
+  // 热度值：新版页面把数字放在 data-search-interest / aria-label 里，旧版在 title 上
+  const interestOf = (el) => {{
+    if (!el) return null;
+    const dsi = el.getAttribute('data-search-interest');
+    if (dsi != null && /^\d+$/.test(dsi.trim())) return parseInt(dsi, 10);
+    const m = (el.getAttribute('aria-label') || '').match(/(\d+)\s*$/);
+    return m ? parseInt(m[1], 10) : null;
+  }};
+  const parseQueryRow = (tr, i) => {{
     const cells = Array.from(tr.querySelectorAll('td'));
-    if (cells.length < 3) return null;
-    const rankCell = cells[0].textContent.trim();
+    if (cells.length < 4) return null;
     const query = (cells[1].querySelector('.Z9Uqw') || cells[1]).textContent.trim();
-    const img = cells[2].querySelector('[role="img"]');
-    const interest = img ? parseInt(img.getAttribute('title'), 10) : null;
-    const chgCell = cells[3];
-    const chgTxt = chgCell ? ((chgCell.querySelector('span') || chgCell).textContent || '').trim() : '';
-    const pm = chgTxt.match(/([+-−])\s*([\d,.]+)\s*%/);
-    const change = pm ? ((pm[1] === '-' || pm[1] === '−') ? '-' : '+') + pm[2] + '%'
-      : /暴增|突破|breakout/i.test(chgTxt) ? 'breakout' : (chgTxt || null);
+    if (!query) return null;
     const rankText = (cells[0].textContent || '').trim();
     const rank = /^\d+$/.test(rankText) ? parseInt(rankText, 10) : i + 1;
+    const interest = interestOf(cells[2].querySelector('[role="img"]'));
+    const chgCell = cells[3];
+    const chgTxt = chgCell ? ((chgCell.querySelector('.VYi2zf') || chgCell).textContent || '').trim() : '';
+    const pm = chgTxt.match(/([+-−])\s*([\d,.]+)\s*%/);
+    let change = null;
+    if (pm) change = ((pm[1] === '-' || pm[1] === '−') ? '-' : '+') + pm[2] + '%';
+    else if (/暴增|突破|breakout/i.test(chgTxt)) change = 'breakout';
+    else if (/没有变化|无变化|no change/i.test(chgTxt)) change = '+0%';
     return {{ rank, query, interest: Number.isFinite(interest) ? interest : null, change }};
-  }}).filter(Boolean);
-  // 表格和下一页按钮都按 x 排序一一对应（aria-label 本地化，不能写死文案）
-  const tables = Array.from(document.querySelectorAll('table')).sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
-  const nextBtns = Array.from(document.querySelectorAll('button')).filter((b) => {{
-    const a = b.getAttribute('aria-label') || '';
-    return /下一页|next page|next/i.test(a);
-  }}).sort((a, b) => a.getBoundingClientRect().x - b.getBoundingClientRect().x);
-  const isDisabled = (btn) => btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.hasAttribute('disabled');
-  const collect = async (table, nextBtn) => {{
+  }};
+  const parseRegionRow = (tr, i) => {{
+    const cells = Array.from(tr.querySelectorAll('td'));
+    if (cells.length < 3) return null;
+    const nameEl = cells[1].querySelector('[role="button"]') || cells[1];
+    const region = nameEl.textContent.trim();
+    if (!region) return null;
+    const bar = cells[2].querySelector('[role="img"]');
+    const rankText = (cells[0].textContent || '').trim();
+    const rank = /^\d+$/.test(rankText) ? parseInt(rankText, 10) : i + 1;
+    return {{ rank, region, geo_code: (bar && bar.getAttribute('data-geo-code')) || null, interest: Number.isFinite(interestOf(bar)) ? interestOf(bar) : null }};
+  }};
+  // 翻页按钮定位：从表格向上找第一层恰好只有一颗翻页按钮的祖先容器；若该层有多颗，
+  // 用元素归属判定——按钮向上找到的「单表容器」装的是不是当前这张表（不依赖坐标）
+  const isNextBtn = (b) => /下一页|next page|next/i.test(b.getAttribute('aria-label') || '');
+  const ownsTable = (btn, table) => {{
+    let p = btn;
+    for (let j = 0; j < 10 && p; j++) {{
+      p = p.parentElement;
+      if (!p) break;
+      const inner = p.querySelectorAll('table');
+      if (inner.length === 1) return inner[0] === table;
+    }}
+    return false;
+  }};
+  const nextBtnFor = (table) => {{
+    let el = table;
+    for (let i = 0; i < 10 && el; i++) {{
+      el = el.parentElement;
+      if (!el) break;
+      const btns = Array.from(el.querySelectorAll('button')).filter(isNextBtn);
+      if (btns.length === 1) return btns[0];
+      if (btns.length > 1) return btns.find((b) => ownsTable(b, table)) || null;
+    }}
+    // 兜底：整页只有一颗翻页按钮时直接用
+    const allBtns = Array.from(document.querySelectorAll('button')).filter(isNextBtn);
+    return allBtns.length === 1 ? allBtns[0] : null;
+  }};
+  const isDisabled = (btn) => !btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.hasAttribute('disabled');
+  // 点击翻页后 Google 会整体重渲染、替换 table 节点，所以每页都重新按结构解析表格引用
+  const resolveTable = (kind) => Array.from(document.querySelectorAll('table')).find((t) => kindOf(t) === kind);
+  const collect = async (getTable, parseRow) => {{
     const seen = new Set();
     const rows = [];
-    for (let p = 0; p < 10; p++) {{
-      const pageRows = parseTable(table);
-      for (const r of pageRows) {{
-        if (!seen.has(r.rank)) {{ rows.push(r); seen.add(r.rank); }}
+    // 页数上限只作保险（区域表实测可达 14+ 页），正常由「按钮禁用」终止翻页
+    for (let p = 0; p < 30; p++) {{
+      const table = getTable();
+      if (!table) break;
+      for (const r of Array.from(table.querySelectorAll('tbody tr')).map(parseRow)) {{
+        if (r && !seen.has(r.rank)) {{ rows.push(r); seen.add(r.rank); }}
       }}
-      if (isDisabled(nextBtn) || p === 9) break;
+      const nextBtn = nextBtnFor(table);
+      if (isDisabled(nextBtn)) break;
       nextBtn.click();
-      // 等翻页完成：首行 rank 变为未见过，或按钮禁用，最多 5 秒
+      // 等翻页完成：以「非空行数恢复到上一页水平」为准，避免新页面渲染到一半就被采走
+      const filledRows = (t) => Array.from(t.querySelectorAll('tbody tr')).filter((tr) => /^\d+$/.test(((tr.querySelector('td') || {{}}).textContent || '').trim())).length;
+      const prevCount = filledRows(table);
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {{
-        const fr = parseTable(table)[0];
-        if (fr && !seen.has(fr.rank)) break;
-        if (isDisabled(nextBtn)) break;
+        const fresh = getTable();
+        const fr = fresh ? Array.from(fresh.querySelectorAll('tbody tr')).map(parseRow).find(Boolean) : null;
+        const ready = fresh && filledRows(fresh) >= prevCount && fr && !seen.has(fr.rank);
+        if (ready || (nextBtn && !nextBtn.isConnected)) break;
         await sleep(300);
       }}
     }}
     return rows;
   }};
-  const top = tables[0] ? await collect(tables[0], nextBtns[0]) : [];
-  const rising = tables[1] ? await collect(tables[1], nextBtns[1]) : [];
+  let top = await collect(() => resolveTable('top'), parseQueryRow);
+  let rising = await collect(() => resolveTable('rising'), parseQueryRow);
+  const regions = await collect(() => resolveTable('region'), parseRegionRow);
+  // 兜底：卡片标题匹配不到时（界面文案变化），未分类的查询表按文档顺序当 top/rising
+  if (!top.length && !rising.length) {{
+    const posTable = (idx) => {{
+      let ts = Array.from(document.querySelectorAll('table')).filter((t) => kindOf(t) === 'unknown');
+      if (!ts.length) ts = Array.from(document.querySelectorAll('table')).filter(isQueryHeader);
+      return ts[idx]; // DOM 文档顺序兜底，不做坐标排序
+    }};
+    if (!top.length) top = await collect(() => posTable(0), parseQueryRow);
+    if (!rising.length) rising = await collect(() => posTable(1), parseQueryRow);
+  }}
   const tablesAvailable = top.length > 0 || rising.length > 0;
-  return {{ trend, top, rising, tables_available: tablesAvailable }};
+  return {{ trend, top, rising, regions, tables_available: tablesAvailable }};
 }})()"#
     )
 }
@@ -289,7 +372,8 @@ fn compare_script(terms: &[String], date_spec: &str) -> String {
 }
 
 /// Google Trends：查询搜索趋势，返回趋势序列 + 热门/上升关键词。
-/// 返回 `{ "tab_id": ..., "query": ..., "date": ..., "geo": ..., "trend": [...], "top": [...], "rising": [...] }`。
+/// Google Trends：查询搜索趋势，返回趋势序列 + 热门/上升关键词 + 区域热度。
+/// 返回 `{ "tab_id": ..., "query": ..., "date": ..., "geo": ..., "trend": [...], "top": [...], "rising": [...], "regions": [...] }`。
 pub async fn googletrends(
     bridge: &mut Bridge,
     query: &str,
@@ -358,6 +442,7 @@ pub async fn googletrends(
         "trend": data.get("trend").cloned().unwrap_or_else(|| json!([])),
         "top": data.get("top").cloned().unwrap_or_else(|| json!([])),
         "rising": data.get("rising").cloned().unwrap_or_else(|| json!([])),
+        "regions": data.get("regions").cloned().unwrap_or_else(|| json!([])),
     });
     if !tables_available {
         out["note"] = json!(
