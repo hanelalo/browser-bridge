@@ -87,7 +87,7 @@ cargo run -- get-a11y-tree
 | `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
 | `youtubeinfo '<视频URL或ID>'` | 获取指定 YouTube 视频详情：字幕全文、URL、作者、时长、点赞/评论/订阅数，输出 `{ tab_id, video }` |
 | `youtuberinfo '<频道URL或handle>' [--max]` | 获取指定 YouTube 频道（youtuber）的视频列表：频道名、订阅数、视频名称/URL/观看数/时长/发布时间，最多返回 `--max` 条（默认 10），输出 `{ tab_id, channel, videos }` |
-| `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ trend[], top[], rising[] }` |
+| `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ tab_id, trend[], top[], rising[], regions[] }` |
 | `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
 | `querydomains '<关键词>' [--tlds 'com,ai,xyz']` | Query.Domains 批量查域名注册情况与价格，输出 `{ results[] }`（每项含 domain / tld / status / available / price / badges） |
 
@@ -233,13 +233,15 @@ cargo run -- youtuberinfo '@xiaojunpodcast' --max 20   # 最多返回 20 条
 ### googletrends
 
 Google Trends 趋势查询，返回 `{ tab_id, trend[], top[], rising[] }`：
+Google Trends 趋势查询，返回 `{ tab_id, trend[], top[], rising[], regions[] }`：
 
 ```sh
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 ```
 
 - `trend`：时间序列 `[{ date, value }]`，`value` 为 0-100 相对热度（从图表 SVG 曲线坐标反解 + y 轴刻度校准）
-- `top` / `rising`：热门查询与热度上升的查询（排名、关键词、热度、变化百分比），自动翻完所有分页（每表一般 5 页共 50 条，上限 10 页）
+- `top` / `rising`：热门查询与热度上升的查询（排名、关键词、热度、变化百分比），自动翻完所有分页
+- `regions`：按地区显示的搜索热度 `[{ rank, region, geo_code, interest }]`，`geo_code` 为 ISO 地区码，同样自动翻完分页（实测可达 66 个地区）
 - `--date` 支持 `today 1-m`（默认）/ `today 3-m` / `today 12-m` / `today 5-y` / `all`，`--geo` 默认 `Worldwide`
 - 关键词表是懒加载的，需要滚动到底部才渲染，配方会自动滚动内部容器等待表格数据
 - 每次查询新开一个标签页（同标签页反复导航时图表偶发不加载，新标签页稳定），这些标签页会被扩展记录，可用 `close-auto-tabs` 清理

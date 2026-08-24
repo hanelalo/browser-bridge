@@ -229,7 +229,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 
 #### googletrends
 
-单关键词 Google Trends 查询，自动翻页拿完整趋势序列 + 热门/上升查询。**每次查询会新建一个标签页**，流程收尾时请调用 `close_auto_tabs` 清理。
+单关键词 Google Trends 查询，自动翻页拿完整趋势序列 + 热门/上升查询 + 区域热度。**每次查询会新建一个标签页**，流程收尾时请调用 `close_auto_tabs` 清理。
 
 参数：
 
@@ -239,7 +239,10 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `date` | string | — | `today 1-m` | 时间范围：`today 1-m` / `today 3-m` / `today 12-m` / `today 5-y` / `all` |
 | `geo` | string | — | `Worldwide` | 地区代码（如 `US`、`CN`），不区分大小写 |
 
-返回：`{ "tab_id": int, "trend": [...], "top": [...], "rising": [...] }`。
+返回：`{ "tab_id": int, "trend": [...], "top": [...], "rising": [...], "regions": [...] }`。
+
+- `top` / `rising`：热门/上升查询，每条 `{ rank, query, interest, change }`，自动翻完所有分页（一般各 50 条）
+- `regions`：按地区显示的搜索热度，每条 `{ rank, region, geo_code, interest }`（`geo_code` 为 ISO 地区码），同样自动翻完分页（实测可达 66 条）
 
 #### googletrends_compare
 
