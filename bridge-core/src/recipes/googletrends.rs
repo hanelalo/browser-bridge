@@ -8,6 +8,60 @@ use crate::transport::{urlencode, Bridge};
 const DEFAULT_DATE: &str = "today 1-m";
 const DEFAULT_GEO: &str = "Worldwide";
 
+/// 规范化 Google Trends 的 date 参数：去空白、识别合法格式、非法回落默认值。
+/// 合法格式：today N-d / today N-m / today N-y / all / YYYY-MM-DD YYYY-MM-DD。
+fn normalize_date(date: &str) -> String {
+    let d = date.trim();
+    if d.is_empty() {
+        return DEFAULT_DATE.to_string();
+    }
+    let today_ok = regex_dmy(d);
+    let range_ok = regex_range(d);
+    if d == "all" || today_ok || range_ok {
+        d.to_string()
+    } else {
+        DEFAULT_DATE.to_string()
+    }
+}
+
+/// 匹配 today N-d / today N-m / today N-y
+fn regex_dmy(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("today ") else {
+        return false;
+    };
+    // rest 形如 "N-d" / "N-m" / "N-y"
+    let Some(idx) = rest.find('-') else {
+        return false;
+    };
+    let (num, unit) = (&rest[..idx], &rest[idx + 1..]);
+    matches!(unit, "d" | "m" | "y") && !num.is_empty() && num.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 匹配 YYYY-MM-DD YYYY-MM-DD
+fn regex_range(s: &str) -> bool {
+    let mut it = s.split_whitespace();
+    match (it.next(), it.next(), it.next()) {
+        (Some(a), Some(b), None) => is_date(a) && is_date(b),
+        _ => false,
+    }
+}
+
+/// 匹配 YYYY-MM-DD
+fn is_date(s: &str) -> bool {
+    let mut it = s.splitn(3, '-');
+    match (it.next(), it.next(), it.next(), it.next()) {
+        (Some(y), Some(m), Some(d), None) => {
+            y.len() == 4
+                && m.len() == 2
+                && d.len() == 2
+                && y.chars().all(|c| c.is_ascii_digit())
+                && m.chars().all(|c| c.is_ascii_digit())
+                && d.chars().all(|c| c.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
 /// 页面内执行脚本：等图表和表格加载完，反解趋势曲线并读两张关键词表。
 /// 日期由脚本端按 date 参数 + 点数推导（不依赖页面本地化文案）。
 fn trends_script(date_spec: &str) -> String {
@@ -91,19 +145,23 @@ fn trends_script(date_spec: &str) -> String {
     const now = new Date();
     let end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     let start = null;
-    const m = spec.match(/^today\s+(\d+)-([my])$/);
+    const s = String(spec).trim();
+    const m = s.match(/^today\s+(\d+)-([dmy])$/);
     if (m) {{
       const k = parseInt(m[1], 10);
       start = new Date(end);
-      if (m[2] === 'm') start.setMonth(end.getMonth() - k);
+      if (m[2] === 'd') start.setDate(end.getDate() - k);
+      else if (m[2] === 'm') start.setMonth(end.getMonth() - k);
       else start.setFullYear(end.getFullYear() - k);
-    }} else if (spec === 'all') {{
+    }} else if (s === 'all') {{
       start = new Date(2004, 0, 1);
     }} else {{
-      const dm = spec.match(/^(\d{{4}}-\d{{2}}-\d{{2}})\s+(\d{{4}}-\d{{2}}-\d{{2}})$/);
+      const dm = s.match(/^(\d{{4}}-\d{{2}}-\d{{2}})\s+(\d{{4}}-\d{{2}}-\d{{2}})$/);
       if (dm) {{ start = new Date(dm[1]); end = new Date(dm[2]); }}
     }}
-    if (!start || n <= 0) return Array(n).fill(null);
+    // 无法识别的日期格式：回落为今天往前一个月，保证日期永不缺失
+    if (!start) {{ start = new Date(end); start.setMonth(end.getMonth() - 1); }}
+    if (n <= 0) return [];
     const days = Math.round((end - start) / 86400000);
     const back = (offset) => new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset);
     // Google 的采样点以今天为终点往前排，日期从终点倒推而不是从起点正推
@@ -338,19 +396,23 @@ fn compare_script(terms: &[String], date_spec: &str) -> String {
     const now = new Date();
     let end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     let start = null;
-    const m = spec.match(/^today\s+(\d+)-([my])$/);
+    const s = String(spec).trim();
+    const m = s.match(/^today\s+(\d+)-([dmy])$/);
     if (m) {{
       const k = parseInt(m[1], 10);
       start = new Date(end);
-      if (m[2] === 'm') start.setMonth(end.getMonth() - k);
+      if (m[2] === 'd') start.setDate(end.getDate() - k);
+      else if (m[2] === 'm') start.setMonth(end.getMonth() - k);
       else start.setFullYear(end.getFullYear() - k);
-    }} else if (spec === 'all') {{
+    }} else if (s === 'all') {{
       start = new Date(2004, 0, 1);
     }} else {{
-      const dm = spec.match(/^(\d{{4}}-\d{{2}}-\d{{2}})\s+(\d{{4}}-\d{{2}}-\d{{2}})$/);
+      const dm = s.match(/^(\d{{4}}-\d{{2}}-\d{{2}})\s+(\d{{4}}-\d{{2}}-\d{{2}})$/);
       if (dm) {{ start = new Date(dm[1]); end = new Date(dm[2]); }}
     }}
-    if (!start || n <= 0) return Array(n).fill(null);
+    // 无法识别的日期格式：回落为今天往前一个月，保证日期永不缺失
+    if (!start) {{ start = new Date(end); start.setMonth(end.getMonth() - 1); }}
+    if (n <= 0) return [];
     const days = Math.round((end - start) / 86400000);
     const back = (offset) => new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset);
     if (Math.abs(n - days) <= 2) return Array.from({{ length: n }}, (_, i) => fmt(back(n - 1 - i)));
@@ -380,15 +442,15 @@ pub async fn googletrends(
     date: &str,
     geo: &str,
 ) -> Result<Value, String> {
-    let date = if date.trim().is_empty() { DEFAULT_DATE } else { date };
+    let date = normalize_date(date);
     let geo = if geo.trim().is_empty() { DEFAULT_GEO } else { geo };
     let url = format!(
         "https://trends.google.com/explore?q={}&date={}&geo={}",
         urlencode(query),
-        urlencode(date),
+        urlencode(&date),
         urlencode(geo)
     );
-    let script = trends_script(date);
+    let script = trends_script(&date);
     let mut tab_id = Value::Null;
     let mut data = Value::Null;
     // Trends 同标签页反复导航时图表偶发不加载，新标签页则稳定。
@@ -464,7 +526,7 @@ pub async fn googletrends_compare(
     if terms.is_empty() {
         return Err("googletrends-compare: 至少需要一个关键词".to_string());
     }
-    let date = if date.trim().is_empty() { DEFAULT_DATE } else { date };
+    let date = normalize_date(date);
     let geo = if geo.trim().is_empty() { DEFAULT_GEO } else { geo };
     let q = terms
         .iter()
@@ -475,11 +537,11 @@ pub async fn googletrends_compare(
     let url = format!(
         "https://trends.google.com/explore?q={}&date={}&geo={}",
         urlencode(&q),
-        urlencode(date),
+        urlencode(&date),
         urlencode(geo)
     );
 
-    let script = compare_script(terms, date);
+    let script = compare_script(terms, &date);
     let mut tab_id = Value::Null;
     let mut data = Value::Null;
     for attempt in 0..3 {
