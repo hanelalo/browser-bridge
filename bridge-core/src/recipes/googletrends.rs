@@ -77,20 +77,25 @@ fn trends_script(date_spec: &str) -> String {
       if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
     }});
   }};
-  // 打开后先等 2~3 秒让页面完成首屏渲染，再按 20%/50%/80%/100% 分段下滑，
-  // 每段间隔 500ms，避免一打开页面就直接跳到底部
-  const stagedScroll = async () => {{
+  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 3 秒走完：
+  // 进度按真实耗时计算，慢速经过每个区块，可见性机制（懒加载等）才来得及触发。
+  // 用 setTimeout 步进而非 requestAnimationFrame——后台标签页 rAF 不触发会卡死；
+  // 高度随懒加载增长时每帧重算最大值，保证 3 秒整仍能落到真实底部
+  const smoothScroll = async () => {{
     await sleep(2000 + Math.random() * 1000);
-    for (const pct of [0.2, 0.5, 0.8, 1]) {{
-      const maxY = document.body.scrollHeight - window.innerHeight;
-      window.scrollTo(0, Math.max(0, maxY * pct));
+    const DURATION = 3000;
+    const start = Date.now();
+    for (;;) {{
+      const p = Math.min(1, (Date.now() - start) / DURATION);
+      window.scrollTo(0, Math.max(0, (document.body.scrollHeight - window.innerHeight) * p));
       Array.from(document.querySelectorAll('div')).forEach((el) => {{
-        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight * pct;
+        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = (el.scrollHeight - el.clientHeight) * p;
       }});
-      await sleep(500);
+      if (p >= 1) break;
+      await sleep(50);
     }}
   }};
-  await stagedScroll();
+  await smoothScroll();
   let svg = null;
   let line = null;
   while (Date.now() < deadline) {{
@@ -325,20 +330,25 @@ fn compare_script(terms: &[String], date_spec: &str) -> String {
       if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
     }});
   }};
-  // 打开后先等 2~3 秒让页面完成首屏渲染，再按 20%/50%/80%/100% 分段下滑，
-  // 每段间隔 500ms，避免一打开页面就直接跳到底部
-  const stagedScroll = async () => {{
+  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 3 秒走完：
+  // 进度按真实耗时计算，慢速经过每个区块，可见性机制（懒加载等）才来得及触发。
+  // 用 setTimeout 步进而非 requestAnimationFrame——后台标签页 rAF 不触发会卡死；
+  // 高度随懒加载增长时每帧重算最大值，保证 3 秒整仍能落到真实底部
+  const smoothScroll = async () => {{
     await sleep(2000 + Math.random() * 1000);
-    for (const pct of [0.2, 0.5, 0.8, 1]) {{
-      const maxY = document.body.scrollHeight - window.innerHeight;
-      window.scrollTo(0, Math.max(0, maxY * pct));
+    const DURATION = 3000;
+    const start = Date.now();
+    for (;;) {{
+      const p = Math.min(1, (Date.now() - start) / DURATION);
+      window.scrollTo(0, Math.max(0, (document.body.scrollHeight - window.innerHeight) * p));
       Array.from(document.querySelectorAll('div')).forEach((el) => {{
-        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight * pct;
+        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = (el.scrollHeight - el.clientHeight) * p;
       }});
-      await sleep(500);
+      if (p >= 1) break;
+      await sleep(50);
     }}
   }};
-  await stagedScroll();
+  await smoothScroll();
   let svg = null;
   let lines = null;
   while (Date.now() < deadline) {{
