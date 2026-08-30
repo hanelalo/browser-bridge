@@ -152,7 +152,7 @@ cargo run -- click '#submit'              # target 直接可用
 
 ### screenshot
 
-截取页面可见区域截图，输出 `{ tab_id, url, title, mime, format, width, height, size, data }`，`data` 是完整 base64 data URL（`data:image/png;base64,...` / `data:image/jpeg;base64,...`），MCP 场景可直接让 agent 看图：
+截取页面可见区域截图，协议输出 `{ tab_id, url, title, mime, format, width, height, size, data }`，`data` 是完整 base64 data URL（`data:image/png;base64,...` / `data:image/jpeg;base64,...`）。MCP 的 `screenshot` 工具会把图片作为**标准 MCP 图片块**返回（另附文本元信息块），agent 可直接查看、无需自己解码：
 
 ```sh
 cargo run -- screenshot                                # 当前激活页，PNG

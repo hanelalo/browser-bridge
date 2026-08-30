@@ -348,16 +348,17 @@ fn ok(value: Value) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
-async fn call(
+/// 发送请求并返回原始 JSON 结果（不包装成 MCP 内容块），自动拉起 Chrome 并重试。
+async fn call_value(
     bridge: &Arc<Mutex<Bridge>>,
     id: &str,
     method: &str,
     params: Value,
-) -> Result<CallToolResult, ErrorData> {
+) -> Result<Value, ErrorData> {
     *last_activity().lock().unwrap() = Instant::now();
     let mut b = bridge.lock().await;
     match b.request(id, method, params.clone()).await {
-        Ok(v) => return ok(v),
+        Ok(v) => return Ok(v),
         Err(e) if e.contains(NO_EXTENSION_ERR) => {
             // Chrome 没在运行（或扩展没连上）：拉起默认 Chrome，等扩展注册后重试
             eprintln!("[bridge-mcp] no extension connected, ensuring Chrome is running");
@@ -373,7 +374,7 @@ async fn call(
         eprintln!("[bridge-mcp] waiting {delay}ms for extension (attempt {})", attempt + 1);
         tokio::time::sleep(Duration::from_millis(*delay)).await;
         match b.request(id, method, params.clone()).await {
-            Ok(v) => return ok(v),
+            Ok(v) => return Ok(v),
             Err(e) if e.contains(NO_EXTENSION_ERR) => continue,
             Err(e) => return Err(ErrorData::internal_error(e, None)),
         }
@@ -382,6 +383,16 @@ async fn call(
         "no extension connected：已尝试拉起 Chrome，请确认浏览器里加载了 Browser Bridge 扩展",
         None,
     ))
+}
+
+async fn call(
+    bridge: &Arc<Mutex<Bridge>>,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> Result<CallToolResult, ErrorData> {
+    let value = call_value(bridge, id, method, params).await?;
+    ok(value)
 }
 
 /// 检查 Chrome 是否已在运行。
@@ -757,7 +768,7 @@ impl BridgeMcp {
         call(&self.bridge, "a11y", "get_a11y_tree", v).await
     }
 
-    #[tool(name = "screenshot", description = "截取页面可见区域截图，返回 { tab_id, url, title, mime, format, width, height, size, data }。data 为完整 base64 图片 data URL（data:image/png;base64,... 或 data:image/jpeg;base64,...），可直接展示或解码保存为文件。窗口被其他应用完全遮挡时，截到的可能是遮挡内容，传 foreground=true 先把窗口拉到前台再截；format=jpeg 时可用 quality（0-100）控制质量")]
+    #[tool(name = "screenshot", description = "截取页面可见区域截图，返回一个标准 MCP 图片块（agent 可直接查看，无需解码）+ 一个文本块（元信息 { tab_id, url, title, mime, format, width, height, size }）。窗口被其他应用完全遮挡时，截到的可能是遮挡内容，传 foreground=true 先把目标窗口拉到 OS 前台再截；format=jpeg 时可用 quality（0-100）控制质量")]
     pub async fn screenshot(
         &self,
         params: Parameters<ScreenshotParams>,
@@ -773,7 +784,32 @@ impl BridgeMcp {
         if p.foreground.unwrap_or(false) {
             v["foreground"] = json!(true);
         }
-        call(&self.bridge, "ss", "screenshot", v).await
+        let value = call_value(&self.bridge, "ss", "screenshot", v).await?;
+        // 图片：从 data URL 中拆出纯 base64，作为标准 MCP image content block 返回
+        let data_url = value
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ErrorData::internal_error("screenshot 响应缺少 data 字段", None))?;
+        let b64 = data_url
+            .split_once(',')
+            .map(|(_, b)| b.to_string())
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| ErrorData::internal_error("screenshot data 不是合法的 data URL", None))?;
+        let mime = value
+            .get("mime")
+            .and_then(Value::as_str)
+            .unwrap_or("image/png")
+            .to_string();
+        // 元信息：去掉重复的 data 字段后作为文本块返回
+        let mut meta = value.clone();
+        if let Some(m) = meta.as_object_mut() {
+            m.remove("data");
+        }
+        let meta_text = serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".to_string());
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(meta_text),
+            ContentBlock::image(b64, mime),
+        ]))
     }
 
     #[tool(name = "googlesearch", description = "Google 搜索，返回 { tab_id, results[] }（title/description/url/target）")]
