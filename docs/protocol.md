@@ -510,6 +510,46 @@ result：
 
 与元素定位行为一致：只遍历 light DOM，不穿透 iframe 与 shadow DOM。
 
+### screenshot
+
+截取页面可见区域截图（默认当前激活标签页），返回 base64 图片 data URL。基于 `chrome.tabs.captureVisibleTab`，捕获的是目标标签页所在窗口的**可见区域**（viewport）。
+
+params：
+
+```json
+{
+  "tab_id": 7,
+  "format": "png",
+  "quality": 90,
+  "foreground": false
+}
+```
+
+- `tab_id`：可选，目标标签页（默认当前激活页 / agent 专用窗口激活页）。目标标签页若不是其窗口的激活页会先激活（不抢 OS 焦点）。
+- `format`：可选，`png`（默认）/ `jpeg`。
+- `quality`：可选，JPEG 质量 0-100（默认 90，仅 `jpeg` 有效）。
+- `foreground`：可选，默认 `false`；为 `true` 时先把目标窗口拉到 OS 前台再截图。窗口被其他应用完全遮挡时，截到的可能是遮挡内容，需要此参数。
+
+result：
+
+```json
+{
+  "tab_id": 7,
+  "url": "https://example.com",
+  "title": "Example",
+  "mime": "image/png",
+  "format": "png",
+  "width": 1280,
+  "height": 720,
+  "size": 18760,
+  "data": "data:image/png;base64,iVBORw0KGgo..."
+}
+```
+
+- `data`：完整 data URL（`data:image/png;base64,...` / `data:image/jpeg;base64,...`），`size` 为 base64 字节数。
+- `width` / `height`：视口尺寸；`chrome://` 等无法注入脚本的受限页面为 `null`（截图本身不受影响）。
+- 只截可见区域，不包含滚动到视口外的内容；需要看页面其他部分时先 `scroll` 再截。
+
 ## 服务端错误
 
 | error | 场景 |

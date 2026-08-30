@@ -56,6 +56,7 @@ cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 cargo run -- get-page-markdown --url https://example.com
 cargo run -- get-a11y-tree
+cargo run -- screenshot --out shot.png
 ```
 
 ### 指令速查表
@@ -82,6 +83,7 @@ cargo run -- get-a11y-tree
 | `get-page-content` | 读取页面标题/URL/文本 |
 | `get-page-markdown [--url <url>] [--selector <css>] [--full]` | 把页面内容转换成标准 Markdown（默认自动提取正文，去掉导航/页脚等噪音） |
 | `get-a11y-tree [--include-hidden] [--max-nodes <n>]` | 读取页面 a11y tree，可交互节点（按钮/链接/输入框等）带 `target` 可直接喂给 `click` / `set_value` |
+| `screenshot [--tab <id>] [--format png\|jpeg] [--quality <0-100>] [--out <file>] [--foreground]` | 截取页面可见区域截图，返回 base64 data URL；`--out` 直接保存为文件 |
 | `googlesearch '<关键词>'` | Google 搜索，输出 `{ tab_id, results }` |
 | `redditsearch '<关键词>'` | Reddit 搜索，输出 `{ tab_id, results }` |
 | `youtubesearch '<关键词>' [--time] [--sort] [--max]` | YouTube 搜索，支持上传日期 / 优先顺序筛选，最多返回 `--max` 条（默认 5），输出 `{ tab_id, results }` |
@@ -147,6 +149,25 @@ cargo run -- click '#submit'              # target 直接可用
 - `--include-hidden`：可选，默认只返回可见元素；开启后包含 `hidden` / `display:none` / `visibility:hidden` / `aria-hidden` 的元素。
 - `--max-nodes`：可选，最多返回节点数（默认 500，范围 10-5000），防止大页面输出过大。
 - 角色与名称优先用 Chrome 的 `computedRole` / `computedName`（Chrome 135+），低版本自动回退到标签/属性推断；只遍历 light DOM，不穿透 iframe 与 shadow DOM（与元素定位行为一致）。
+
+### screenshot
+
+截取页面可见区域截图，输出 `{ tab_id, url, title, mime, format, width, height, size, data }`，`data` 是完整 base64 data URL（`data:image/png;base64,...` / `data:image/jpeg;base64,...`），MCP 场景可直接让 agent 看图：
+
+```sh
+cargo run -- screenshot                                # 当前激活页，PNG
+cargo run -- screenshot --format jpeg --quality 80     # JPEG，质量 80
+cargo run -- screenshot --out shot.png                 # 解码保存为文件（--out 时打印摘要，不输出大段 base64）
+cargo run -- screenshot --tab 7 --out shot.jpg         # 指定标签页
+cargo run -- screenshot --foreground --out shot.png    # 先把目标窗口拉到前台再截（避免被遮挡时截到别的内容）
+```
+
+- 基于 `chrome.tabs.captureVisibleTab`，捕获的是目标标签页所在窗口的**可见区域**（viewport），不含视口外的内容——需要看页面其他部分时先 `scroll` 再截。
+- 目标标签页若不是其窗口的激活页会先激活（不抢 OS 焦点，agent 专用窗口照常工作）。
+- `--format`：`png`（默认）/ `jpeg`；`--quality`：JPEG 质量 0-100（默认 90，仅 jpeg 有效）。
+- `--foreground`：默认关闭。窗口被其他应用完全遮挡时，`captureVisibleTab` 截到的可能是遮挡内容，加 `--foreground` 会把目标窗口拉到 OS 前台再截。
+- `--out`：把 data URL 解码写入指定文件（自动创建父目录）；省略时直接打印完整 data URL。
+- 只截可见区域、不滚动拼接整页：这是 `captureVisibleTab` 的能力边界（本项目不依赖 CDP）。
 
 ### googlesearch
 
@@ -290,7 +311,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
 - 每个 agent（`mcp-` 身份）自动拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；
 - 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
 
 #### 配置示例
 

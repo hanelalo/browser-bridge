@@ -326,6 +326,21 @@ struct A11yTreeParams {
     tab_id: Option<i32>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct ScreenshotParams {
+    #[serde(default)]
+    tab_id: Option<i32>,
+    /// 图片格式：png | jpeg（默认 png）
+    #[serde(default)]
+    format: Option<String>,
+    /// JPEG 质量 0-100（默认 90；仅 jpeg 有效）
+    #[serde(default)]
+    quality: Option<u8>,
+    /// 先把目标窗口拉到前台再截图（避免被其他窗口遮挡时截到别的内容）
+    #[serde(default)]
+    foreground: Option<bool>,
+}
+
 // ---------- 工具辅助 ----------
 
 fn ok(value: Value) -> Result<CallToolResult, ErrorData> {
@@ -740,6 +755,25 @@ impl BridgeMcp {
             v["include_hidden"] = json!(true);
         }
         call(&self.bridge, "a11y", "get_a11y_tree", v).await
+    }
+
+    #[tool(name = "screenshot", description = "截取页面可见区域截图，返回 { tab_id, url, title, mime, format, width, height, size, data }。data 为完整 base64 图片 data URL（data:image/png;base64,... 或 data:image/jpeg;base64,...），可直接展示或解码保存为文件。窗口被其他应用完全遮挡时，截到的可能是遮挡内容，传 foreground=true 先把窗口拉到前台再截；format=jpeg 时可用 quality（0-100）控制质量")]
+    pub async fn screenshot(
+        &self,
+        params: Parameters<ScreenshotParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut v = json!({ "tab_id": p.tab_id });
+        if let Some(f) = p.format {
+            v["format"] = json!(f);
+        }
+        if let Some(q) = p.quality {
+            v["quality"] = json!(q);
+        }
+        if p.foreground.unwrap_or(false) {
+            v["foreground"] = json!(true);
+        }
+        call(&self.bridge, "ss", "screenshot", v).await
     }
 
     #[tool(name = "googlesearch", description = "Google 搜索，返回 { tab_id, results[] }（title/description/url/target）")]

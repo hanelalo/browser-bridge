@@ -5,6 +5,7 @@ edition = "2021"
 description = "Browser Bridge CLI client"
 
 [dependencies]
+base64 = "0.22"
 bridge-core = { path = "../bridge-core" }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"

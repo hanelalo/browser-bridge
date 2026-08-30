@@ -278,6 +278,8 @@ async function execute(
       return getPageMarkdown(params, clientId);
     case 'get_a11y_tree':
       return getA11yTree(params, clientId);
+    case 'screenshot':
+      return screenshot(params, clientId);
     default:
       throw new Error(`unknown method: ${method}`);
   }
@@ -995,6 +997,69 @@ function a11yTreeOp(params: Record<string, unknown>): unknown {
   } catch (err) {
     return { __bridge_error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * 截取页面可见区域截图。
+ * chrome.tabs.captureVisibleTab 只能捕获窗口激活标签页的可见区域，因此目标标签页
+ * 若不是所在窗口的激活页会先激活（不抢 OS 焦点）；窗口被其他应用完全遮挡时，
+ * 截到的可能是遮挡内容，需要 foreground: true 先把窗口拉到前台再截。
+ * 返回完整 data URL（data:image/png;base64,... / data:image/jpeg;base64,...）。
+ */
+async function screenshot(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  if (tab.id == null) throw new Error('tab has no id');
+  const format = params.format === 'jpeg' ? 'jpeg' : 'png';
+  let quality: number | undefined;
+  if (format === 'jpeg') {
+    const q = Number(params.quality ?? 90);
+    quality = Number.isFinite(q) ? Math.max(0, Math.min(100, Math.round(q))) : 90;
+  }
+  // captureVisibleTab 只截窗口的激活标签页：目标 tab 若不是激活页先激活
+  if (tab.active !== true) {
+    await chrome.tabs.update(tab.id, { active: true });
+  }
+  // 可选：把窗口拉到前台，避免被其他窗口遮挡时截到别的内容
+  if (params.foreground === true && tab.windowId != null) {
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    } catch {
+      // 窗口可能已关闭，忽略
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  // 读取视口尺寸（chrome:// 等受限页面无法注入脚本时返回 null，不影响截图）
+  let width: number | null = null;
+  let height: number | null = null;
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => ({ width: window.innerWidth, height: window.innerHeight }),
+    });
+    const r = (res?.result ?? {}) as { width?: unknown; height?: unknown };
+    if (typeof r.width === 'number') width = r.width;
+    if (typeof r.height === 'number') height = r.height;
+  } catch {
+    // ignore
+  }
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+    format,
+    ...(quality != null ? { quality } : {}),
+  });
+  const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+  const base64 = typeof dataUrl === 'string' ? (dataUrl.split(',')[1] ?? '') : '';
+  const updated = await chrome.tabs.get(tab.id);
+  return {
+    tab_id: tab.id,
+    url: updated.url ?? null,
+    title: updated.title ?? null,
+    mime,
+    format,
+    width,
+    height,
+    size: base64.length,
+    data: dataUrl,
+  };
 }
 
 /** 关闭标签页（默认当前激活标签页）。 */

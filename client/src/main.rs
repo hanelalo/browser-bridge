@@ -1,5 +1,8 @@
 //! Browser Bridge CLI client（控制端）。
 
+use std::path::PathBuf;
+
+use base64::Engine;
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -354,6 +357,24 @@ enum Cmd {
         #[arg(long)]
         tab: Option<i32>,
     },
+    /// 截取页面可见区域截图（返回 base64 data URL；--out 保存为文件）
+    Screenshot {
+        /// 图片格式：png | jpeg（默认 png）
+        #[arg(long, default_value = "png")]
+        format: String,
+        /// JPEG 质量 0-100（默认 90；仅 jpeg 有效）
+        #[arg(long)]
+        quality: Option<u8>,
+        /// 保存到文件（data URL 解码写入；省略则直接打印 data URL）
+        #[arg(long = "out")]
+        out: Option<PathBuf>,
+        /// 先把目标窗口拉到前台再截图（避免被其他窗口遮挡时截到别的内容）
+        #[arg(long)]
+        foreground: bool,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
 }
 
 #[tokio::main]
@@ -687,6 +708,54 @@ async fn main() {
             }
             ("get_a11y_tree", params)
         }
+        Cmd::Screenshot {
+            format,
+            quality,
+            out,
+            foreground,
+            tab,
+        } => {
+            let mut params = json!({
+                "tab_id": tab,
+                "format": format,
+                "foreground": foreground,
+            });
+            if let Some(q) = quality {
+                params["quality"] = json!(q);
+            }
+            if let Some(path) = out {
+                let mut bridge = match Bridge::connect(&cli.server).await {
+                    Ok(b) => b,
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        std::process::exit(1);
+                    }
+                };
+                match bridge.request("ss", "screenshot", params).await {
+                    Ok(result) => match save_screenshot(&path, &result) {
+                        Ok(()) => {
+                            // 打印摘要时去掉大段 base64，保留元信息
+                            let mut summary = result.clone();
+                            if let Some(m) = summary.as_object_mut() {
+                                m.remove("data");
+                                m["saved_to"] = json!(path.display().to_string());
+                            }
+                            println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+                        }
+                        Err(err) => {
+                            eprintln!("error: {err}");
+                            std::process::exit(1);
+                        }
+                    },
+                    Err(err) => {
+                        eprintln!("error: {err}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            ("screenshot", params)
+        }
     };
 
     if let Err(err) = run(&cli.server, method, params).await {
@@ -725,4 +794,28 @@ fn parse_fields(input: &str) -> Result<Value, String> {
         return Err("--fields 不能为空".to_string());
     }
     Ok(Value::Object(obj))
+}
+
+/// 从 screenshot 响应中取出 data URL，base64 解码后写入文件。
+fn save_screenshot(path: &std::path::Path, result: &Value) -> Result<(), String> {
+    let data = result
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "响应缺少 data 字段".to_string())?;
+    let (meta, b64) = data
+        .split_once(',')
+        .ok_or_else(|| "data 不是合法的 data URL".to_string())?;
+    if !meta.starts_with("data:image/") {
+        return Err("data 不是图片 data URL".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("base64 解码失败: {e}"))?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        }
+    }
+    std::fs::write(path, &bytes).map_err(|e| format!("写入文件失败: {e}"))?;
+    Ok(())
 }
