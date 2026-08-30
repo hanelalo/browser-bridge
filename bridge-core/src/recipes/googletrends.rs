@@ -77,13 +77,13 @@ fn trends_script(date_spec: &str) -> String {
       if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
     }});
   }};
-  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 3 秒走完：
+  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 5 秒走完：
   // 进度按真实耗时计算，慢速经过每个区块，可见性机制（懒加载等）才来得及触发。
   // 用 setTimeout 步进而非 requestAnimationFrame——后台标签页 rAF 不触发会卡死；
-  // 高度随懒加载增长时每帧重算最大值，保证 3 秒整仍能落到真实底部
+  // 高度随懒加载增长时每帧重算最大值，保证 5 秒整仍能落到真实底部
   const smoothScroll = async () => {{
     await sleep(2000 + Math.random() * 1000);
-    const DURATION = 3000;
+    const DURATION = 5000;
     const start = Date.now();
     for (;;) {{
       const p = Math.min(1, (Date.now() - start) / DURATION);
@@ -98,23 +98,30 @@ fn trends_script(date_spec: &str) -> String {
   await smoothScroll();
   let svg = null;
   let line = null;
+  let lineAt = 0;
+  // 曲线判定不依赖 mask 和 d 长度：新渲染变体（稀疏数据等场景）每条线是普通 path，
+  // 无 mask 属性且 d 仅 ~840，图标路径则横跨不达标——用「单段 M 起笔 + 点数足够 +
+  // 横跨绘图区七成以上（右侧标签区宽度随变体不同）」识别
+  const isLinePath = (p, vbW) => {{
+    const d = p.getAttribute('d') || '';
+    const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
+    return (d.match(/M/g) || []).length === 1 && nums.length >= 100
+      && nums[0] <= 2 && nums[nums.length - 2] >= vbW * 0.7;
+  }};
   while (Date.now() < deadline) {{
-    svg = Array.from(document.querySelectorAll('svg')).find((s) => s.getBoundingClientRect().width > 100);
-    if (svg) {{
-      const vbW = (svg.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number)[2] || 1280;
-      line = Array.from(svg.querySelectorAll('path'))
-        .filter((p) => {{
-          const d = p.getAttribute('d') || '';
-          if (d.length < 1500) return false;
-          const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
-          // 曲线横跨整个绘图区（0~1280，viewBox 宽 1384，右侧留标签区），图标路径远小于此
-          return nums.length > 4 && nums[0] <= 2 && nums[nums.length - 2] >= Math.min(vbW - 5, 1000);
-        }})[0] || null;
+    line = null;
+    for (const s of document.querySelectorAll('svg')) {{
+      if (s.getBoundingClientRect().width <= 100) continue;
+      const vbW = (s.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number)[2] || 1280;
+      const hit = Array.from(s.querySelectorAll('path')).filter((p) => isLinePath(p, vbW))[0] || null;
+      if (hit) {{ svg = s; line = hit; break; }}
     }}
-    // 等表格行不是骨架：至少 20 个已填充内容的查询单元格
+    // 等表格行不是骨架：至少 20 个已填充内容的查询单元格。
+    // 曲线已出但表格 6 秒仍无行（无数据词只有贴底平线、没有表）：不再空转到 deadline
     const filledRows = Array.from(document.querySelectorAll('table tbody tr td:nth-child(2)'))
       .filter((td) => (td.textContent || '').trim().length > 0).length;
-    if (line && filledRows >= 20) break;
+    if (line && !lineAt) lineAt = Date.now();
+    if (line && (filledRows >= 20 || Date.now() - lineAt > 6000)) break;
     scrollAll();
     await sleep(300);
   }}
@@ -330,13 +337,13 @@ fn compare_script(terms: &[String], date_spec: &str) -> String {
       if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
     }});
   }};
-  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 3 秒走完：
+  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 5 秒走完：
   // 进度按真实耗时计算，慢速经过每个区块，可见性机制（懒加载等）才来得及触发。
   // 用 setTimeout 步进而非 requestAnimationFrame——后台标签页 rAF 不触发会卡死；
-  // 高度随懒加载增长时每帧重算最大值，保证 3 秒整仍能落到真实底部
+  // 高度随懒加载增长时每帧重算最大值，保证 5 秒整仍能落到真实底部
   const smoothScroll = async () => {{
     await sleep(2000 + Math.random() * 1000);
-    const DURATION = 3000;
+    const DURATION = 5000;
     const start = Date.now();
     for (;;) {{
       const p = Math.min(1, (Date.now() - start) / DURATION);
@@ -351,22 +358,44 @@ fn compare_script(terms: &[String], date_spec: &str) -> String {
   await smoothScroll();
   let svg = null;
   let lines = null;
-  while (Date.now() < deadline) {{
-    svg = Array.from(document.querySelectorAll('svg')).find((s) => s.getBoundingClientRect().width > 100);
-    if (svg) {{
-      // 每条线画了两遍（inverse mask 与普通 mask），取 inverse 的一套，mask 序号即线序
-      lines = Array.from(svg.querySelectorAll('path')).filter((p) => {{
-        const d = p.getAttribute('d') || '';
-        const m = p.getAttribute('mask') || '';
-        return d.length > 1500 && m.includes('inverse-mask');
-      }});
-      if (lines.length === N) break;
+  let lastSeen = 0;
+  // 曲线判定不依赖 mask 和 d 长度（见 isLinePath 注释）；收集时遍历大 SVG，
+  // 取首个凑齐 N 条线的：兼容「inverse-mask 双份绘制」与「无 mask 普通 path」两种渲染变体
+  const isLinePath = (p, vbW) => {{
+    const d = p.getAttribute('d') || '';
+    const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
+    return (d.match(/M/g) || []).length === 1 && nums.length >= 100
+      && nums[0] <= 2 && nums[nums.length - 2] >= vbW * 0.7;
+  }};
+  const collectLines = () => {{
+    let plain = null;
+    for (const s of document.querySelectorAll('svg')) {{
+      if (s.getBoundingClientRect().width <= 100) continue;
+      const vbW = (s.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number)[2] || 1280;
+      const paths = Array.from(s.querySelectorAll('path'));
+      // 经典变体：每条线画两遍（inverse mask 与普通 mask），取 inverse 的一套，mask 序号即线序
+      const masked = paths.filter((p) => (p.getAttribute('mask') || '').includes('inverse-mask') && isLinePath(p, vbW));
+      if (masked.length === N) return {{ svg: s, paths: masked }};
+      // 无 mask 变体（稀疏数据等场景）：每条线一条普通 path，DOM 顺序即词条顺序
+      const unmasked = paths.filter((p) => !p.getAttribute('mask') && isLinePath(p, vbW));
+      if (unmasked.length === N) return {{ svg: s, paths: unmasked }};
+      if (unmasked.length > (plain ? plain.paths.length : 0)) plain = {{ svg: s, paths: unmasked }};
     }}
+    return plain;
+  }};
+  while (Date.now() < deadline) {{
+    const got = collectLines();
+    if (got && got.paths.length === N) {{
+      svg = got.svg;
+      lines = got.paths;
+      break;
+    }}
+    if (got) lastSeen = Math.max(lastSeen, got.paths.length);
     scrollAll();
     await sleep(300);
   }}
   if (!lines || lines.length !== N) {{
-    return {{ error: 'comparison chart not loaded (expected ' + N + ' lines, got ' + (lines ? lines.length : 0) + ')' }};
+    return {{ error: 'comparison chart not loaded (expected ' + N + ' lines, got ' + (lines ? lines.length : lastSeen) + ')' }};
   }}
   const maskIdx = (p) => {{
     const m = (p.getAttribute('mask') || '').match(/timeline-inverse-mask-\d+-(\d+)/);
