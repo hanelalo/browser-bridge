@@ -274,6 +274,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `get_page_content` | 读取页面标题 / URL / 文本 | `tab_id` |
 | `get_page_markdown` | 把页面内容转换为标准 Markdown（默认自动提取正文） | `url`、`selector`、`full`、`tab_id` |
 | `get_a11y_tree` | 读取页面 a11y tree（无障碍树），可交互节点带 `target` 可直接喂给 `click` / `set_value` 等 | `include_hidden`、`max_nodes`（默认 500）、`tab_id` |
+| `screenshot` | 截取页面可见区域截图，返回标准 MCP 图片块（agent 直接查看）+ 文本元信息块 | `format`（`png`/`jpeg`）、`quality`（JPEG 0-100）、`foreground`（先拉前台再截）、`tab_id` |
 | `scrape` | 按 CSS 选择器提取结构化数据 | `item`（必填，结果容器选择器）、`fields`（字段映射：`字段名: "选择器[@属性]"`）、`title` / `link` / `desc`、`timeout`、`tab_id` |
 | `run_script` | 在页面执行任意 JS 表达式，返回 JSON 序列化结果 | `code`（必填）、`tab_id` |
 | `click` | 点击匹配定位的元素 | `target`（必填）、`by`、`index`、`timeout`（默认 5000ms）、`new_tab`（锚点在新标签页打开，默认 false）、`tab_id` |
@@ -324,6 +325,24 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 2. set_value → target 填上一步的 target，value 填用户输入
 3. get_a11y_tree（可选，验证）或 click 提交按钮
 ```
+
+#### screenshot
+
+截取页面可见区域截图（默认当前激活标签页 / agent 专用窗口激活页）。返回 **两个内容块**：
+
+- **标准 MCP 图片块**（`type: image`）：MCP client 会把它自动转成模型 API 的图片输入，**agent 可直接查看**，无需自行解码
+- **文本元信息块**：`{ "tab_id": int, "url": string, "title": string, "mime": "image/png", "format": "png", "width": int, "height": int, "size": int }`
+
+基于 `chrome.tabs.captureVisibleTab`，捕获的是目标标签页所在窗口的**可见区域**（viewport），不含视口外的内容——需要看页面其他部分时先 `scroll` 再截。
+
+参数：
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `tab_id` | int | — | 当前激活页 | 目标标签页；若不是其窗口的激活页会先激活（不抢 OS 焦点） |
+| `format` | string | — | `png` | 图片格式：`png` / `jpeg` |
+| `quality` | int | — | `90` | JPEG 质量 0-100（仅 `jpeg` 有效） |
+| `foreground` | boolean | — | `false` | 先把目标窗口拉到 OS 前台再截；窗口被其他应用完全遮挡时截到的可能是遮挡内容，需要此参数 |
 
 ## 多 agent / 多客户端使用
 
