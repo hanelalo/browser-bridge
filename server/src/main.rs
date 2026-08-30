@@ -16,7 +16,9 @@ use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_PORT: u16 = 9225;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// run_script 的最长往返：googletrends 脚本含首屏等待 + 5s 匀速滚动 + 表格翻页采集，
+// 数据多的查询实测可超 30s，给到 60s 余量
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Role {
@@ -193,7 +195,13 @@ async fn hub_loop(
                         if let Some((client_id, _)) = pending.remove(&id) {
                             send(
                                 conns.get(&client_id),
-                                WireMessage::err(&id, "timeout: extension did not respond in 30s"),
+                                WireMessage::err(
+                                    &id,
+                                    &format!(
+                                        "timeout: extension did not respond in {}s",
+                                        REQUEST_TIMEOUT.as_secs()
+                                    ),
+                                ),
                             );
                         }
                     }
