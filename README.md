@@ -1,3 +1,5 @@
+
+
 # Browser Bridge
 
 通过 WebSocket 把本地工具和真实浏览器连接起来的桥，不需要 CDP。
@@ -289,6 +291,7 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
     ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
     ├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
     ├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
+    ├── querydomains.rs   # Query.Domains 域名批量查询（注册状态/价格，SSE 流）
     └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
