@@ -2,11 +2,49 @@
 //! 通过通用原语 navigate + run_script 编排。
 
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::transport::{urlencode, Bridge};
 
 const DEFAULT_DATE: &str = "today 1-m";
 const DEFAULT_GEO: &str = "Worldwide";
+const GOOGLE_TRENDS_SCRIPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn query_tables_available(top_table_found: bool, rising_table_found: bool) -> bool {
+    top_table_found || rising_table_found
+}
+
+fn should_retry_query_tables(tables_available: bool) -> bool {
+    !tables_available
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        query_tables_available, should_retry_query_tables, GOOGLE_TRENDS_SCRIPT_TIMEOUT,
+    };
+
+    #[test]
+    fn query_tables_are_available_even_when_empty() {
+        assert!(query_tables_available(true, true));
+    }
+
+    #[test]
+    fn query_tables_are_unavailable_when_neither_table_was_found() {
+        assert!(!query_tables_available(false, false));
+    }
+
+    #[test]
+    fn trends_script_timeout_exceeds_default_bridge_request_timeout() {
+        assert!(GOOGLE_TRENDS_SCRIPT_TIMEOUT > crate::transport::RESPONSE_TIMEOUT);
+    }
+
+    #[test]
+    fn missing_query_tables_are_retryable() {
+        assert!(should_retry_query_tables(false));
+        assert!(!should_retry_query_tables(true));
+    }
+}
 
 /// 规范化 Google Trends 的 date 参数：去空白、识别合法格式、非法回落默认值。
 /// 合法格式：today N-d / today N-m / today N-y / all / YYYY-MM-DD YYYY-MM-DD。
@@ -278,10 +316,12 @@ fn trends_script(date_spec: &str) -> String {
   const collect = async (getTable, parseRow) => {{
     const seen = new Set();
     const rows = [];
+    let available = false;
     // 页数上限只作保险（区域表实测可达 14+ 页），正常由「按钮禁用」终止翻页
     for (let p = 0; p < 30; p++) {{
       const table = getTable();
       if (!table) break;
+      available = true;
       for (const r of Array.from(table.querySelectorAll('tbody tr')).map(parseRow)) {{
         if (r && !seen.has(r.rank)) {{ rows.push(r); seen.add(r.rank); }}
       }}
@@ -300,23 +340,25 @@ fn trends_script(date_spec: &str) -> String {
         await sleep(300);
       }}
     }}
-    return rows;
+    return {{ rows, available }};
   }};
-  let top = await collect(() => resolveTable('top'), parseQueryRow);
-  let rising = await collect(() => resolveTable('rising'), parseQueryRow);
-  const regions = await collect(() => resolveTable('region'), parseRegionRow);
+  let topResult = await collect(() => resolveTable('top'), parseQueryRow);
+  let risingResult = await collect(() => resolveTable('rising'), parseQueryRow);
   // 兜底：卡片标题匹配不到时（界面文案变化），未分类的查询表按文档顺序当 top/rising
-  if (!top.length && !rising.length) {{
+  if (!topResult.available && !risingResult.available) {{
     const posTable = (idx) => {{
       let ts = Array.from(document.querySelectorAll('table')).filter((t) => kindOf(t) === 'unknown');
       if (!ts.length) ts = Array.from(document.querySelectorAll('table')).filter(isQueryHeader);
       return ts[idx]; // DOM 文档顺序兜底，不做坐标排序
     }};
-    if (!top.length) top = await collect(() => posTable(0), parseQueryRow);
-    if (!rising.length) rising = await collect(() => posTable(1), parseQueryRow);
+    if (!topResult.available) topResult = await collect(() => posTable(0), parseQueryRow);
+    if (!risingResult.available) risingResult = await collect(() => posTable(1), parseQueryRow);
   }}
-  const tablesAvailable = top.length > 0 || rising.length > 0;
-  return {{ trend, top, rising, regions, tables_available: tablesAvailable }};
+  const regionsResult = await collect(() => resolveTable('region'), parseRegionRow);
+  const tablesAvailable = topResult.available || risingResult.available;
+  return {{ trend, top: topResult.rows, rising: risingResult.rows, regions: regionsResult.rows,
+    top_table_available: topResult.available, rising_table_available: risingResult.available,
+    tables_available: tablesAvailable }};
 }})()"#
     )
 }
@@ -498,10 +540,11 @@ pub async fn googletrends(
         let nav = bridge.request("gt1", "new_tab", json!({ "url": url })).await?;
         tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
         let resp = bridge
-            .request(
+            .request_with_timeout(
                 "gt2",
                 "run_script",
                 json!({ "code": script, "tab_id": tab_id }),
+                GOOGLE_TRENDS_SCRIPT_TIMEOUT,
             )
             .await?;
         let got = resp.get("result").cloned().unwrap_or(Value::Null);
@@ -510,11 +553,16 @@ pub async fn googletrends(
             .and_then(Value::as_str)
             .map(|s| s.contains("trend chart not loaded"))
             .unwrap_or(false);
-        if !is_chart_error {
+        let missing_query_tables = got
+            .get("tables_available")
+            .and_then(Value::as_bool)
+            .map(should_retry_query_tables)
+            .unwrap_or(false);
+        if !is_chart_error && !missing_query_tables {
             data = got;
             break;
         }
-        // 图表没加载出来：关掉这次开的标签页，下轮换新标签页重试
+        // 图表或关键词表没加载出来：关掉这次开的标签页，下轮换新标签页重试
         if tab_id.is_number() {
             let _ = bridge
                 .request(
@@ -531,10 +579,16 @@ pub async fn googletrends(
     if let Some(err) = data.get("error").and_then(Value::as_str) {
         return Err(format!("googletrends: {err}"));
     }
-    let tables_available = data
-        .get("tables_available")
+    let top_table_available = data
+        .get("top_table_available")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let rising_table_available = data
+        .get("rising_table_available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let tables_available = query_tables_available(top_table_available, rising_table_available)
+        || data.get("tables_available").and_then(Value::as_bool).unwrap_or(false);
     let mut out = json!({
         "tab_id": tab_id,
         "query": query,
@@ -544,6 +598,9 @@ pub async fn googletrends(
         "top": data.get("top").cloned().unwrap_or_else(|| json!([])),
         "rising": data.get("rising").cloned().unwrap_or_else(|| json!([])),
         "regions": data.get("regions").cloned().unwrap_or_else(|| json!([])),
+        "top_table_available": top_table_available,
+        "rising_table_available": rising_table_available,
+        "tables_available": tables_available,
     });
     if !tables_available {
         out["note"] = json!(
@@ -587,10 +644,11 @@ pub async fn googletrends_compare(
         let nav = bridge.request("gtc1", "new_tab", json!({ "url": url })).await?;
         tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
         let resp = bridge
-            .request(
+            .request_with_timeout(
                 "gtc2",
                 "run_script",
                 json!({ "code": script, "tab_id": tab_id }),
+                GOOGLE_TRENDS_SCRIPT_TIMEOUT,
             )
             .await?;
         let got = resp.get("result").cloned().unwrap_or(Value::Null);

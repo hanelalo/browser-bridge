@@ -884,7 +884,7 @@ impl BridgeMcp {
         ok(out)
     }
 
-    #[tool(name = "googletrends", description = "Google Trends 趋势查询，返回 { tab_id, trend[], top[], rising[], regions[] }；regions 为按地区的搜索热度（rank/region/geo_code/interest）")]
+    #[tool(name = "googletrends", description = "Google Trends 趋势查询，返回 { tab_id, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available }。available 表示表格已成功读取，即使 rows 为空也可能为 true；regions 为按地区的搜索热度（rank/region/geo_code/interest）")]
     pub async fn googletrends_tool(
         &self,
         params: Parameters<GoogletrendsParams>,

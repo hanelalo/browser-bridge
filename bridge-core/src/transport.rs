@@ -52,15 +52,27 @@ impl Bridge {
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
+        self.request_with_timeout(id, method, params, RESPONSE_TIMEOUT)
+            .await
+    }
+
+    /// Send one request with a caller-selected response timeout.
+    pub async fn request_with_timeout(
+        &mut self,
+        id: &str,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         // 请求 id 只是语义标签，线上用唯一 id（进程 id + 自增序号），
         // 避免多 agent 并发时 server 按 id 路由响应串线
         static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
         let wire_id = format!("{id}-{}-{}", std::process::id(), REQ_SEQ.fetch_add(1, Ordering::Relaxed));
-        match request(&mut self.ws, &wire_id, method, params.clone()).await {
+        match request_with_timeout(&mut self.ws, &wire_id, method, params.clone(), timeout).await {
             Ok(value) => Ok(value),
             Err(_) => {
                 self.ws = connect_bridge(&self.server, &self.client_id).await?;
-                request(&mut self.ws, &wire_id, method, params).await
+                request_with_timeout(&mut self.ws, &wire_id, method, params, timeout).await
             }
         }
     }
@@ -189,6 +201,17 @@ pub async fn request(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
+    request_with_timeout(ws, id, method, params, RESPONSE_TIMEOUT).await
+}
+
+/// Send one request and wait up to `timeout` for its matching response.
+pub async fn request_with_timeout(
+    ws: &mut BridgeStream,
+    id: &str,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
     ws.send(Message::Text(
         json!({ "id": id, "method": method, "params": params })
             .to_string()
@@ -197,7 +220,7 @@ pub async fn request(
     .await
     .map_err(|e| e.to_string())?;
 
-    let deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
