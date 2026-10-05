@@ -114,7 +114,7 @@ cd extension && pnpm install && pnpm build
 claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bridge-mcp
 ```
 
-配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`youtuberinfo`、`googletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
+配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`youtuberinfo`、`googletrends`、`oldgoogletrends`、`googletrends_compare`、`close_auto_tabs` 等）。
 
 ## 可用工具
 
@@ -243,6 +243,27 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 
 - `top` / `rising`：热门/上升查询，每条 `{ rank, query, interest, change }`，自动翻完所有分页（一般各 50 条）
 - `regions`：按地区显示的搜索热度，每条 `{ rank, region, geo_code, interest }`（`geo_code` 为 ISO 地区码），同样自动翻完分页（实测可达 66 条）
+
+#### oldgoogletrends
+
+经典版（Gemini 改版前）Google Trends 单关键词查询，自动打开带 `legacy` 参数的 `/trends/explore` 页面，读取页面 DOM，通过热门/上升切换控件和分页按钮采集榜单，不主动请求 API。每次新建标签页，收尾时调用 `close_auto_tabs` 清理。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `query` | string | ✔ | — | 单个非空关键词，不支持逗号分隔的对比 |
+| `date` | string | — | `today 1-m` | `now 7-d`（过去 7 天）、`now 1-d`、`now 1-h`、`today N-d/N-m/N-y`、`all` 或 `YYYY-MM-DD YYYY-MM-DD`；无效格式报错 |
+| `geo` | string | — | `Worldwide` | 全球可用 `Worldwide` 或空字符串；地区代码如 `US` / `CN`，不区分大小写 |
+
+示例参数：`{"query":"ai image detector","date":"now 7-d","geo":"Worldwide"}`。
+
+返回 `{ tab_id, query, date, geo, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available, regions_available }`：
+
+- `trend` 每条 `{ date, value }`，直接读取图表的无障碍数据表，`date` 保留页面时间标签（不推算 UTC 时间或缺失年份）；非数值热度返回 `null` 并保留 `value_text`。
+- `top` / `rising` 每条 `{ rank, query, interest, change }`，通过页面切换及翻页取得完整榜单。上升查询的 `interest` 为 `null`，`change` 为增长百分比或 `breakout`；热门查询的 `change` 为 `null`。
+- `regions` 每条 `{ rank, region, geo_code, interest }`，保留页面显示的顺序，页面未提供地区码时 `geo_code` 为 `null`。
+- `*_available` 表示读取成功，正常空榜单仍为 `true`；`tables_available` 表示至少一张查询榜单读取成功。加载、切换或分页失败返回 `errors` 及对应 `false`，可能附已采集的部分行；趋势表格读取失败则报错。页面明确显示无数据或禁用某类查询选项时才视为正常空数据。
+
+原有 `googletrends` 和 `googletrends_compare` 继续使用新版页面配方。
 
 #### googletrends_compare
 

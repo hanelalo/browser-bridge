@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
+use bridge_core::recipes::oldgoogletrends::oldgoogletrends;
 use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
@@ -272,6 +273,18 @@ struct GoogletrendsParams {
     #[serde(default)]
     date: Option<String>,
     /// 地区（默认 Worldwide）
+    #[serde(default)]
+    geo: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct OldgoogletrendsParams {
+    /// 单个搜索关键词
+    query: String,
+    /// 时间范围（默认 today 1-m；支持 now 7-d / now 1-d / today 3-m / all / YYYY-MM-DD YYYY-MM-DD）
+    #[serde(default)]
+    date: Option<String>,
+    /// 地区代码（默认 Worldwide，空字符串也表示全球；如 US / CN）
     #[serde(default)]
     geo: Option<String>,
 }
@@ -892,6 +905,24 @@ impl BridgeMcp {
         let p = params.0;
         let mut bridge = self.bridge.lock().await;
         let out = googletrends(
+            &mut bridge,
+            &p.query,
+            p.date.as_deref().unwrap_or("today 1-m"),
+            p.geo.as_deref().unwrap_or("Worldwide"),
+        )
+        .await
+        .map_err(|e| ErrorData::internal_error(e, None))?;
+        ok(out)
+    }
+
+    #[tool(name = "oldgoogletrends", description = "经典版 Google Trends（legacy）单关键词查询，支持 now 7-d。返回 { tab_id, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available, regions_available }。从页面 DOM 读取趋势表格、切换热门/上升并翻页，trend.date 保留页面时间标签；rising.interest 为 null，change 为增长百分比或 breakout。空榜单 available=true，读取失败为 false 并附 errors。新建标签页，收尾用 close_auto_tabs 清理")]
+    pub async fn oldgoogletrends_tool(
+        &self,
+        params: Parameters<OldgoogletrendsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        let mut bridge = self.bridge.lock().await;
+        let out = oldgoogletrends(
             &mut bridge,
             &p.query,
             p.date.as_deref().unwrap_or("today 1-m"),

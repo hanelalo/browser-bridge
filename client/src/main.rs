@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
+use bridge_core::recipes::oldgoogletrends::oldgoogletrends;
 use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
@@ -135,6 +136,17 @@ enum Cmd {
         #[arg(long, default_value = "today 1-m")]
         date: String,
         /// 地区（默认 Worldwide）
+        #[arg(long, default_value = "Worldwide")]
+        geo: String,
+    },
+    /// 查询经典版 Google Trends（legacy），读取页面趋势表格 + 热门/上升查询 + 地区热度
+    Oldgoogletrends {
+        /// 单个搜索关键词
+        query: String,
+        /// 时间范围（如 now 7-d / now 1-d / today 1-m / all / YYYY-MM-DD YYYY-MM-DD）
+        #[arg(long, default_value = "today 1-m")]
+        date: String,
+        /// 地区代码（默认 Worldwide；如 US / CN）
         #[arg(long, default_value = "Worldwide")]
         geo: String,
     },
@@ -486,6 +498,23 @@ async fn main() {
                 }
             };
             match googletrends(&mut bridge, &query, &date, &geo).await {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::Oldgoogletrends { query, date, geo } => {
+            let mut bridge = match Bridge::connect(&cli.server).await {
+                Ok(b) => b,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match oldgoogletrends(&mut bridge, &query, &date, &geo).await {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");

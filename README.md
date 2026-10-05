@@ -53,6 +53,7 @@ cargo run -- youtubeinfo 'https://www.youtube.com/watch?v=rQ_J9WH6CGk'
 cargo run -- youtuberinfo 'https://www.youtube.com/@xiaojunpodcast/videos'
 cargo run -- youtuberinfo '@xiaojunpodcast' --max 20
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
+cargo run -- oldgoogletrends 'ai image detector' --date 'now 7-d' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
 cargo run -- get-page-markdown --url https://example.com
 cargo run -- get-a11y-tree
@@ -90,6 +91,7 @@ cargo run -- screenshot --out shot.png
 | `youtubeinfo '<视频URL或ID>'` | 获取指定 YouTube 视频详情：字幕全文、URL、作者、时长、点赞/评论/订阅数，输出 `{ tab_id, video }` |
 | `youtuberinfo '<频道URL或handle>' [--max]` | 获取指定 YouTube 频道（youtuber）的视频列表：频道名、订阅数、视频名称/URL/观看数/时长/发布时间，最多返回 `--max` 条（默认 10），输出 `{ tab_id, channel, videos }` |
 | `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ tab_id, trend[], top[], rising[], regions[] }` |
+| `oldgoogletrends '<关键词>' [--date] [--geo]` | 经典版 Google Trends（legacy），读取页面趋势表格 + 完整热门/上升查询 + 地区热度 |
 | `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
 | `querydomains '<关键词>' [--tlds 'com,ai,xyz']` | Query.Domains 批量查域名注册情况与价格，输出 `{ results[] }`（每项含 domain / tld / status / available / price / badges） |
 
@@ -267,6 +269,25 @@ cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 - 关键词表是懒加载的，需要滚动到底部才渲染，配方会自动滚动内部容器等待表格数据
 - 每次查询新开一个标签页（同标签页反复导航时图表偶发不加载，新标签页稳定），这些标签页会被扩展记录，可用 `close-auto-tabs` 清理
 
+### oldgoogletrends
+
+针对 Gemini 改版前的经典 Explore 页面，自动打开 `/trends/explore?...&legacy&hl=zh-CN`。CLI 与 MCP 工具名均为 `oldgoogletrends`，读取页面已经渲染的趋势表格，并操作热门/上升切换控件及分页按钮，不主动请求 API。
+
+```sh
+# 在项目根目录运行：ai image detector，全球，过去 7 天
+cargo run -p bridge-client -- oldgoogletrends 'ai image detector' --date 'now 7-d' --geo Worldwide
+```
+
+- `--date` 默认 `today 1-m`，支持 `now 1-h` / `now 4-h` / `now 1-d` / `now 7-d`、`today N-d/N-m/N-y`、`all` 或 `YYYY-MM-DD YYYY-MM-DD`。无效格式报错，不会静默改成一个月。
+- `--geo` 默认 `Worldwide`；空字符串也表示全球，地区代码如 `US` / `CN` 会转为大写。经典版全球查询不发送 `geo=Worldwide`。
+- `trend`：`[{ date, value }]`；直接读取图表自带的无障碍数据表。`date` 保留页面时间标签（如 `9月28日 14:00`），不推算缺失年份或 UTC 时间；`value` 为页面热度值，非数值内容返回 `null` 并保留 `value_text`。
+- `top` / `rising`：`[{ rank, query, interest, change }]`，自动翻完页面榜单。热门查询有 `interest`、`change: null`；上升查询有增长百分比或 `breakout`，`interest: null`（经典版不提供上升查询的独立热度）。
+- `regions`：`[{ rank, region, geo_code, interest }]`，保留页面榜单顺序；页面未提供地区码时 `geo_code` 为 `null`。
+- `top_table_available` / `rising_table_available` / `tables_available` / `regions_available` 表示对应数据读取成功；正常空榜单也为 `true`。加载、切换或分页失败会附 `errors`，保留已采集的部分行，对应 available 为 `false`；趋势表格未加载则整条指令报错。
+- 每次新建标签页；成功后可用 `close-auto-tabs` 清理，失败时自动关闭本次标签页。原有 `googletrends` 继续用于新版页面。
+
+配方验证：`cargo test --workspace` 和 `node --test bridge-core/tests/oldgoogletrends.test.mjs`。
+
 ### googletrends-compare
 
 多关键词走势对比，返回 `{ tab_id, terms[], date, geo, series[] }`，每个关键词一条趋势序列。**共享 0-100 刻度**（100 = 所有词中的最高峰值），便于直接比较；不返回热门/上升查询表：
@@ -289,7 +310,9 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
     ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
     ├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
     ├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
-    └── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
+    ├── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
+    ├── oldgoogletrends.rs # 经典版 Trends（参数校验 + 浏览器编排）
+    └── oldgoogletrends.js # 经典版 DOM 读取 + 切换/翻页
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
@@ -311,7 +334,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
 - 每个 agent（`mcp-` 身份）自动拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；
 - 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare`。
 
 #### 配置示例
 
