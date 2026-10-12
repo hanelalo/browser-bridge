@@ -20,9 +20,7 @@ fn should_retry_query_tables(tables_available: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        query_tables_available, should_retry_query_tables, GOOGLE_TRENDS_SCRIPT_TIMEOUT,
-    };
+    use super::{query_tables_available, should_retry_query_tables, GOOGLE_TRENDS_SCRIPT_TIMEOUT};
 
     #[test]
     fn query_tables_are_available_even_when_empty() {
@@ -524,7 +522,11 @@ pub async fn googletrends(
     geo: &str,
 ) -> Result<Value, String> {
     let date = normalize_date(date);
-    let geo = if geo.trim().is_empty() { DEFAULT_GEO } else { geo };
+    let geo = if geo.trim().is_empty() {
+        DEFAULT_GEO
+    } else {
+        geo
+    };
     let url = format!(
         "https://trends.google.com/explore?q={}&date={}&geo={}",
         urlencode(query),
@@ -537,7 +539,9 @@ pub async fn googletrends(
     // Trends 同标签页反复导航时图表偶发不加载，新标签页则稳定。
     // 每次查询新开标签页（扩展会记录，可用 close-auto-tabs 清理），失败则关掉重开。
     for attempt in 0..3 {
-        let nav = bridge.request("gt1", "new_tab", json!({ "url": url })).await?;
+        let nav = bridge
+            .request("gt1", "new_tab", json!({ "url": url }))
+            .await?;
         tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
         let resp = bridge
             .request_with_timeout(
@@ -565,11 +569,7 @@ pub async fn googletrends(
         // 图表或关键词表没加载出来：关掉这次开的标签页，下轮换新标签页重试
         if tab_id.is_number() {
             let _ = bridge
-                .request(
-                    "gt3",
-                    "close_tab",
-                    json!({ "tab_id": tab_id }),
-                )
+                .request("gt3", "close_tab", json!({ "tab_id": tab_id }))
                 .await;
         }
         if attempt == 2 {
@@ -588,7 +588,10 @@ pub async fn googletrends(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let tables_available = query_tables_available(top_table_available, rising_table_available)
-        || data.get("tables_available").and_then(Value::as_bool).unwrap_or(false);
+        || data
+            .get("tables_available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     let mut out = json!({
         "tab_id": tab_id,
         "query": query,
@@ -623,7 +626,11 @@ pub async fn googletrends_compare(
         return Err("googletrends-compare: 至少需要一个关键词".to_string());
     }
     let date = normalize_date(date);
-    let geo = if geo.trim().is_empty() { DEFAULT_GEO } else { geo };
+    let geo = if geo.trim().is_empty() {
+        DEFAULT_GEO
+    } else {
+        geo
+    };
     let q = terms
         .iter()
         .map(|t| t.trim())
@@ -641,7 +648,9 @@ pub async fn googletrends_compare(
     let mut tab_id = Value::Null;
     let mut data = Value::Null;
     for attempt in 0..3 {
-        let nav = bridge.request("gtc1", "new_tab", json!({ "url": url })).await?;
+        let nav = bridge
+            .request("gtc1", "new_tab", json!({ "url": url }))
+            .await?;
         tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
         let resp = bridge
             .request_with_timeout(

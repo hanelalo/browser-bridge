@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use bridge_core::recipes::googlesearch::googlesearch;
@@ -22,11 +22,10 @@ use futures_util::StreamExt;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData};
 use rmcp::tool_handler;
-use rmcp::{ServiceExt, tool, tool_router};
+use rmcp::{tool, tool_router, ServiceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
 
 const DEFAULT_SERVER: &str = "ws://127.0.0.1:9225";
 const NO_EXTENSION_ERR: &str = "no extension connected";
@@ -44,7 +43,7 @@ fn last_activity() -> &'static StdMutex<Instant> {
 
 #[derive(Clone)]
 struct BridgeMcp {
-    bridge: Arc<Mutex<Bridge>>,
+    bridge: Bridge,
     client_id: String,
 }
 
@@ -54,6 +53,8 @@ struct BridgeMcp {
 struct TabParams {
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -61,6 +62,8 @@ struct NavigateParams {
     url: String,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -75,6 +78,8 @@ struct TargetParams {
     index: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -92,6 +97,8 @@ struct ClickParams {
     new_tab: Option<bool>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -100,6 +107,8 @@ struct ClickAtParams {
     y: f64,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -119,6 +128,8 @@ struct PressKeyParams {
     wait_load: Option<bool>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -137,6 +148,8 @@ struct ScrollParams {
     smooth: Option<bool>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -149,6 +162,8 @@ struct SetValueParams {
     index: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -163,6 +178,8 @@ struct CheckParams {
     index: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -183,6 +200,8 @@ struct SelectOptionParams {
     index: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -202,6 +221,8 @@ struct ScrapeParams {
     timeout: Option<u64>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -209,12 +230,16 @@ struct RunScriptParams {
     code: String,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct NewTabParams {
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -222,6 +247,8 @@ struct GooglesearchParams {
     query: String,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -229,6 +256,8 @@ struct RedditsearchParams {
     query: String,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -245,6 +274,8 @@ struct YoutubesearchParams {
     max: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -253,6 +284,8 @@ struct YoutubeinfoParams {
     url: String,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -264,6 +297,8 @@ struct YoutuberinfoParams {
     max: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -275,6 +310,8 @@ struct GoogletrendsParams {
     /// 地区（默认 Worldwide）
     #[serde(default)]
     geo: Option<String>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -287,6 +324,8 @@ struct OldgoogletrendsParams {
     /// 地区代码（默认 Worldwide，空字符串也表示全球；如 US / CN）
     #[serde(default)]
     geo: Option<String>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -299,6 +338,8 @@ struct GoogletrendsCompareParams {
     /// 地区（默认 Worldwide）
     #[serde(default)]
     geo: Option<String>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -310,6 +351,8 @@ struct QuerydomainsParams {
     tlds: Option<Vec<String>>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -325,6 +368,8 @@ struct GetPageMarkdownParams {
     full: Option<bool>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -337,6 +382,8 @@ struct A11yTreeParams {
     max_nodes: Option<usize>,
     #[serde(default)]
     tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -352,6 +399,21 @@ struct ScreenshotParams {
     /// 先把目标窗口拉到前台再截图（避免被其他窗口遮挡时截到别的内容）
     #[serde(default)]
     foreground: Option<bool>,
+    #[serde(default)]
+    window_id: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct WindowParams {
+    window_id: i32,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct NewWindowParams {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    focused: Option<bool>,
 }
 
 // ---------- 工具辅助 ----------
@@ -363,14 +425,13 @@ fn ok(value: Value) -> Result<CallToolResult, ErrorData> {
 
 /// 发送请求并返回原始 JSON 结果（不包装成 MCP 内容块），自动拉起 Chrome 并重试。
 async fn call_value(
-    bridge: &Arc<Mutex<Bridge>>,
+    bridge: &Bridge,
     id: &str,
     method: &str,
     params: Value,
 ) -> Result<Value, ErrorData> {
     *last_activity().lock().unwrap() = Instant::now();
-    let mut b = bridge.lock().await;
-    match b.request(id, method, params.clone()).await {
+    match bridge.request(id, method, params.clone()).await {
         Ok(v) => return Ok(v),
         Err(e) if e.contains(NO_EXTENSION_ERR) => {
             // Chrome 没在运行（或扩展没连上）：拉起默认 Chrome，等扩展注册后重试
@@ -384,9 +445,12 @@ async fn call_value(
     // 扩展连接 server 有 500ms→5s 退避重连；Chrome 冷启动可能较慢，留足 ~30s
     let delays_ms: [u64; 8] = [1500, 2000, 3000, 4000, 5000, 5000, 5000, 5000];
     for (attempt, delay) in delays_ms.iter().enumerate() {
-        eprintln!("[bridge-mcp] waiting {delay}ms for extension (attempt {})", attempt + 1);
+        eprintln!(
+            "[bridge-mcp] waiting {delay}ms for extension (attempt {})",
+            attempt + 1
+        );
         tokio::time::sleep(Duration::from_millis(*delay)).await;
-        match b.request(id, method, params.clone()).await {
+        match bridge.request(id, method, params.clone()).await {
             Ok(v) => return Ok(v),
             Err(e) if e.contains(NO_EXTENSION_ERR) => continue,
             Err(e) => return Err(ErrorData::internal_error(e, None)),
@@ -399,7 +463,7 @@ async fn call_value(
 }
 
 async fn call(
-    bridge: &Arc<Mutex<Bridge>>,
+    bridge: &Bridge,
     id: &str,
     method: &str,
     params: Value,
@@ -420,15 +484,20 @@ fn chrome_running() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 fn chrome_running() -> bool {
-    ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
-        .iter()
-        .any(|name| {
-            Command::new("pgrep")
-                .args(["-x", name])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
+    [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ]
+    .iter()
+    .any(|name| {
+        Command::new("pgrep")
+            .args(["-x", name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 /// 确保 Chrome 在运行：没运行就拉起默认 Chrome（共享用户默认 profile，不另开隔离实例）。
@@ -460,7 +529,12 @@ fn ensure_chrome_running() -> Result<(), String> {
     if chrome_running() {
         return Ok(());
     }
-    for bin in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"] {
+    for bin in [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ] {
         if Command::new(bin)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -486,7 +560,12 @@ fn quit_chrome() {
 
 #[cfg(not(target_os = "macos"))]
 fn quit_chrome() {
-    for bin in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"] {
+    for bin in [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+    ] {
         let _ = Command::new("pkill").args(["-x", bin]).status();
     }
 }
@@ -496,17 +575,59 @@ fn with_target(
     by: Option<&str>,
     index: Option<usize>,
     tab_id: Option<i32>,
+    window_id: Option<i32>,
 ) -> Value {
-    json!({
+    let mut value = json!({
         "target": target::spec(by.unwrap_or("css"), target_value, index),
         "tab_id": tab_id,
-    })
+    });
+    if let Some(window_id) = window_id {
+        value["window_id"] = json!(window_id);
+    }
+    value
 }
 
 // ---------- MCP tools ----------
 
 #[tool_router]
 impl BridgeMcp {
+    #[tool(name = "list_windows", description = "列出浏览器窗口及其标签页")]
+    pub async fn list_windows(&self) -> Result<CallToolResult, ErrorData> {
+        call(&self.bridge, "lw", "list_windows", json!({})).await
+    }
+
+    #[tool(name = "new_window", description = "创建一个可供任务绑定的浏览器窗口")]
+    pub async fn new_window(
+        &self,
+        params: Parameters<NewWindowParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let p = params.0;
+        call(
+            &self.bridge,
+            "nw",
+            "new_window",
+            json!({
+                "url": p.url,
+                "focused": p.focused.unwrap_or(false),
+            }),
+        )
+        .await
+    }
+
+    #[tool(name = "close_window", description = "关闭指定浏览器窗口及其标签页")]
+    pub async fn close_window(
+        &self,
+        params: Parameters<WindowParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        call(
+            &self.bridge,
+            "cw",
+            "close_window",
+            json!({ "window_id": params.0.window_id }),
+        )
+        .await
+    }
+
     #[tool(name = "list_tabs", description = "列出所有标签页")]
     pub async fn list_tabs(&self) -> Result<CallToolResult, ErrorData> {
         call(&self.bridge, "lt", "list_tabs", json!({})).await
@@ -517,10 +638,19 @@ impl BridgeMcp {
         &self,
         params: Parameters<TabParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        call(&self.bridge, "ct", "close_tab", json!({ "tab_id": params.0.tab_id })).await
+        call(
+            &self.bridge,
+            "ct",
+            "close_tab",
+            json!({ "tab_id": params.0.tab_id, "window_id": params.0.window_id }),
+        )
+        .await
     }
 
-    #[tool(name = "close_auto_tabs", description = "关闭本会话（当前 MCP 进程）自动打开的标签页（new_tab / click --new-tab / googletrends 创建的），不影响其他会话。流程结束时请务必调用本工具，清理本次任务创建的标签页，避免浏览器堆积")]
+    #[tool(
+        name = "close_auto_tabs",
+        description = "关闭本会话（当前 MCP 进程）自动打开的标签页（new_tab / click --new-tab / googletrends 创建的），不影响其他会话。流程结束时请务必调用本工具，清理本次任务创建的标签页，避免浏览器堆积"
+    )]
     pub async fn close_auto_tabs(&self) -> Result<CallToolResult, ErrorData> {
         call(
             &self.bridge,
@@ -531,7 +661,10 @@ impl BridgeMcp {
         .await
     }
 
-    #[tool(name = "close_agent_window", description = "关闭本会话（当前 MCP 进程）的专用浏览器窗口（连同窗口内所有标签页），释放资源。任务执行完毕后请调用本工具关闭自己的窗口，避免窗口堆积；不影响其他会话的窗口")]
+    #[tool(
+        name = "close_agent_window",
+        description = "关闭本会话（当前 MCP 进程）的专用浏览器窗口（连同窗口内所有标签页），释放资源。任务执行完毕后请调用本工具关闭自己的窗口，避免窗口堆积；不影响其他会话的窗口"
+    )]
     pub async fn close_agent_window(&self) -> Result<CallToolResult, ErrorData> {
         call(
             &self.bridge,
@@ -547,7 +680,13 @@ impl BridgeMcp {
         &self,
         params: Parameters<NewTabParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        call(&self.bridge, "nt", "new_tab", json!({ "url": params.0.url })).await
+        call(
+            &self.bridge,
+            "nt",
+            "new_tab",
+            json!({ "url": params.0.url, "window_id": params.0.window_id }),
+        )
+        .await
     }
 
     #[tool(name = "activate_tab", description = "切换到指定标签页并聚焦窗口")]
@@ -555,7 +694,13 @@ impl BridgeMcp {
         &self,
         params: Parameters<TabParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        call(&self.bridge, "at", "activate_tab", json!({ "tab_id": params.0.tab_id })).await
+        call(
+            &self.bridge,
+            "at",
+            "activate_tab",
+            json!({ "tab_id": params.0.tab_id, "window_id": params.0.window_id }),
+        )
+        .await
     }
 
     #[tool(name = "navigate", description = "导航到指定 URL 并等待加载完成")]
@@ -564,7 +709,13 @@ impl BridgeMcp {
         params: Parameters<NavigateParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        call(&self.bridge, "nav", "navigate", json!({ "url": p.url, "tab_id": p.tab_id })).await
+        call(
+            &self.bridge,
+            "nav",
+            "navigate",
+            json!({ "url": p.url, "tab_id": p.tab_id, "window_id": p.window_id }),
+        )
+        .await
     }
 
     #[tool(name = "click", description = "点击匹配定位的元素")]
@@ -573,7 +724,7 @@ impl BridgeMcp {
         params: Parameters<ClickParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id);
+        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         if let Some(t) = p.timeout {
             v["timeout"] = json!(t);
         }
@@ -593,18 +744,21 @@ impl BridgeMcp {
             &self.bridge,
             "cxy",
             "click_at",
-            json!({ "x": p.x, "y": p.y, "tab_id": p.tab_id }),
+            json!({ "x": p.x, "y": p.y, "tab_id": p.tab_id, "window_id": p.window_id }),
         )
         .await
     }
 
-    #[tool(name = "press_key", description = "模拟按键（Enter/Escape/a/F5 等，支持修饰键）")]
+    #[tool(
+        name = "press_key",
+        description = "模拟按键（Enter/Escape/a/F5 等，支持修饰键）"
+    )]
     pub async fn press_key(
         &self,
         params: Parameters<PressKeyParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = json!({ "key": p.key, "tab_id": p.tab_id });
+        let mut v = json!({ "key": p.key, "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(m) = p.modifiers {
             v["modifiers"] = json!(m);
         }
@@ -628,6 +782,7 @@ impl BridgeMcp {
             "dy": p.dy.unwrap_or(0.0),
             "smooth": p.smooth.unwrap_or(false),
             "tab_id": p.tab_id,
+            "window_id": p.window_id,
         });
         if let Some(t) = p.target {
             v["target"] = target::spec(p.by.as_deref().unwrap_or("css"), &t, p.index);
@@ -635,13 +790,16 @@ impl BridgeMcp {
         call(&self.bridge, "scr", "scroll", v).await
     }
 
-    #[tool(name = "set_value", description = "设置 input/textarea/contenteditable 的值")]
+    #[tool(
+        name = "set_value",
+        description = "设置 input/textarea/contenteditable 的值"
+    )]
     pub async fn set_value(
         &self,
         params: Parameters<SetValueParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id);
+        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         v["value"] = json!(p.value);
         call(&self.bridge, "sv", "set_value", v).await
     }
@@ -652,7 +810,7 @@ impl BridgeMcp {
         params: Parameters<CheckParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id);
+        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         v["checked"] = json!(p.checked.unwrap_or(true));
         call(&self.bridge, "chk", "check", v).await
     }
@@ -663,7 +821,7 @@ impl BridgeMcp {
         params: Parameters<SelectOptionParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id);
+        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         if let Some(x) = p.option_value {
             v["value"] = json!(x);
         }
@@ -686,7 +844,7 @@ impl BridgeMcp {
             &self.bridge,
             "clr",
             "clear",
-            with_target(&p.target, p.by.as_deref(), p.index, p.tab_id),
+            with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id),
         )
         .await
     }
@@ -701,21 +859,24 @@ impl BridgeMcp {
             &self.bridge,
             "gv",
             "get_value",
-            with_target(&p.target, p.by.as_deref(), p.index, p.tab_id),
+            with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id),
         )
         .await
     }
 
-    #[tool(name = "scrape", description = "按 CSS 选择器提取结构化数据（字段映射：字段名:选择器[@属性]）")]
+    #[tool(
+        name = "scrape",
+        description = "按 CSS 选择器提取结构化数据（字段映射：字段名:选择器[@属性]）"
+    )]
     pub async fn scrape(
         &self,
         params: Parameters<ScrapeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = json!({ "item": p.item, "tab_id": p.tab_id });
+        let mut v = json!({ "item": p.item, "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(f) = p.fields {
-            v["fields"] =
-                serde_json::to_value(&f).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            v["fields"] = serde_json::to_value(&f)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         }
         if let Some(t) = p.title {
             v["title"] = json!(t);
@@ -732,13 +893,22 @@ impl BridgeMcp {
         call(&self.bridge, "scp", "scrape", v).await
     }
 
-    #[tool(name = "run_script", description = "在页面里执行任意 JS 表达式，返回 JSON 序列化结果")]
+    #[tool(
+        name = "run_script",
+        description = "在页面里执行任意 JS 表达式，返回 JSON 序列化结果"
+    )]
     pub async fn run_script(
         &self,
         params: Parameters<RunScriptParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        call(&self.bridge, "rs", "run_script", json!({ "code": p.code, "tab_id": p.tab_id })).await
+        call(
+            &self.bridge,
+            "rs",
+            "run_script",
+            json!({ "code": p.code, "tab_id": p.tab_id, "window_id": p.window_id }),
+        )
+        .await
     }
 
     #[tool(name = "get_page_content", description = "读取页面标题/URL/文本")]
@@ -746,16 +916,25 @@ impl BridgeMcp {
         &self,
         params: Parameters<TabParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        call(&self.bridge, "gpc", "get_page_content", json!({ "tab_id": params.0.tab_id })).await
+        call(
+            &self.bridge,
+            "gpc",
+            "get_page_content",
+            json!({ "tab_id": params.0.tab_id, "window_id": params.0.window_id }),
+        )
+        .await
     }
 
-    #[tool(name = "get_page_markdown", description = "把指定页面内容转换为标准 Markdown（标题/段落/列表/表格/代码块/链接/图片），返回 { tab_id, title, url, markdown }。默认用 Readability 自动提取正文去除导航/页脚等噪音，可传 url 先导航；selector 只转换某个容器（如 article / #content）；full=true 时跳过提取转换整个页面")]
+    #[tool(
+        name = "get_page_markdown",
+        description = "把指定页面内容转换为标准 Markdown（标题/段落/列表/表格/代码块/链接/图片），返回 { tab_id, title, url, markdown }。默认用 Readability 自动提取正文去除导航/页脚等噪音，可传 url 先导航；selector 只转换某个容器（如 article / #content）；full=true 时跳过提取转换整个页面"
+    )]
     pub async fn get_page_markdown(
         &self,
         params: Parameters<GetPageMarkdownParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = json!({ "tab_id": p.tab_id });
+        let mut v = json!({ "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(u) = p.url {
             v["url"] = json!(u);
         }
@@ -768,26 +947,32 @@ impl BridgeMcp {
         call(&self.bridge, "gpm", "get_page_markdown", v).await
     }
 
-    #[tool(name = "get_a11y_tree", description = "读取页面 a11y tree（无障碍树），返回 { tab_id, title, url, count, nodes[] }。每个节点含 role（角色）/ name（可访问名称）/ value（当前值）/ states（状态：enabled/disabled/checked/unchecked/expanded/collapsed/required/readonly 等）/ depth（DOM 深度）/ tag；heading 额外带 level。可交互节点（button/link/textbox/searchbox/checkbox/radio/combobox/listbox/slider/select 等）带 target，可直接喂给 click / set_value / check / select_option / clear / get_value。适合与页面交互前先了解页面结构、找出可点击或可填写的元素")]
+    #[tool(
+        name = "get_a11y_tree",
+        description = "读取页面 a11y tree（无障碍树），返回 { tab_id, title, url, count, nodes[] }。每个节点含 role（角色）/ name（可访问名称）/ value（当前值）/ states（状态：enabled/disabled/checked/unchecked/expanded/collapsed/required/readonly 等）/ depth（DOM 深度）/ tag；heading 额外带 level。可交互节点（button/link/textbox/searchbox/checkbox/radio/combobox/listbox/slider/select 等）带 target，可直接喂给 click / set_value / check / select_option / clear / get_value。适合与页面交互前先了解页面结构、找出可点击或可填写的元素"
+    )]
     pub async fn get_a11y_tree(
         &self,
         params: Parameters<A11yTreeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = json!({ "tab_id": p.tab_id, "max_nodes": p.max_nodes.unwrap_or(500) });
+        let mut v = json!({ "tab_id": p.tab_id, "window_id": p.window_id, "max_nodes": p.max_nodes.unwrap_or(500) });
         if p.include_hidden.unwrap_or(false) {
             v["include_hidden"] = json!(true);
         }
         call(&self.bridge, "a11y", "get_a11y_tree", v).await
     }
 
-    #[tool(name = "screenshot", description = "截取页面可见区域截图，返回一个标准 MCP 图片块（agent 可直接查看，无需解码）+ 一个文本块（元信息 { tab_id, url, title, mime, format, width, height, size }）。窗口被其他应用完全遮挡时，截到的可能是遮挡内容，传 foreground=true 先把目标窗口拉到 OS 前台再截；format=jpeg 时可用 quality（0-100）控制质量")]
+    #[tool(
+        name = "screenshot",
+        description = "截取页面可见区域截图，返回一个标准 MCP 图片块（agent 可直接查看，无需解码）+ 一个文本块（元信息 { tab_id, url, title, mime, format, width, height, size }）。窗口被其他应用完全遮挡时，截到的可能是遮挡内容，传 foreground=true 先把目标窗口拉到 OS 前台再截；format=jpeg 时可用 quality（0-100）控制质量"
+    )]
     pub async fn screenshot(
         &self,
         params: Parameters<ScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut v = json!({ "tab_id": p.tab_id });
+        let mut v = json!({ "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(f) = p.format {
             v["format"] = json!(f);
         }
@@ -807,7 +992,9 @@ impl BridgeMcp {
             .split_once(',')
             .map(|(_, b)| b.to_string())
             .filter(|b| !b.is_empty())
-            .ok_or_else(|| ErrorData::internal_error("screenshot data 不是合法的 data URL", None))?;
+            .ok_or_else(|| {
+                ErrorData::internal_error("screenshot data 不是合法的 data URL", None)
+            })?;
         let mime = value
             .get("mime")
             .and_then(Value::as_str)
@@ -825,39 +1012,48 @@ impl BridgeMcp {
         ]))
     }
 
-    #[tool(name = "googlesearch", description = "Google 搜索，返回 { tab_id, results[] }（title/description/url/target）")]
+    #[tool(
+        name = "googlesearch",
+        description = "Google 搜索，返回 { tab_id, results[] }（title/description/url/target）"
+    )]
     pub async fn googlesearch_tool(
         &self,
         params: Parameters<GooglesearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
-        let out = googlesearch(&mut bridge, &p.query, p.tab_id)
-            .await
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let mut bridge = self.bridge.start_task(p.window_id);
+        let out = googlesearch(&mut bridge, &p.query, p.tab_id).await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "redditsearch", description = "Reddit 搜索，返回 { tab_id, results[] }（title/description/published/published_at/votes/comments/url/target；votes/comments 为整数 upvote/评论数量，published_at 为 ISO 时间戳）")]
+    #[tool(
+        name = "redditsearch",
+        description = "Reddit 搜索，返回 { tab_id, results[] }（title/description/published/published_at/votes/comments/url/target；votes/comments 为整数 upvote/评论数量，published_at 为 ISO 时间戳）"
+    )]
     pub async fn redditsearch_tool(
         &self,
         params: Parameters<RedditsearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
-        let out = redditsearch(&mut bridge, &p.query, p.tab_id)
-            .await
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let mut bridge = self.bridge.start_task(p.window_id);
+        let out = redditsearch(&mut bridge, &p.query, p.tab_id).await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "youtubesearch", description = "YouTube 搜索，返回 { tab_id, results[] }（title/channel/views/published/duration/url/target），支持上传日期（today/week/month/year）与优先顺序（relevance/popularity）筛选")]
+    #[tool(
+        name = "youtubesearch",
+        description = "YouTube 搜索，返回 { tab_id, results[] }（title/channel/views/published/duration/url/target），支持上传日期（today/week/month/year）与优先顺序（relevance/popularity）筛选"
+    )]
     pub async fn youtubesearch_tool(
         &self,
         params: Parameters<YoutubesearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
+        let mut bridge = self.bridge.start_task(p.window_id);
         let out = youtubesearch(
             &mut bridge,
             &p.query,
@@ -866,106 +1062,129 @@ impl BridgeMcp {
             p.max.unwrap_or(5),
             p.tab_id,
         )
-        .await
-        .map_err(|e| ErrorData::internal_error(e, None))?;
+        .await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "youtubeinfo", description = "获取指定 YouTube 视频详情，返回 { tab_id, video }（url/title/author/author_url/duration/duration_seconds/like_count/comment_count/subscriber_count/captions[]，字幕为全文，各计数同时附 *_text 原始文本）")]
+    #[tool(
+        name = "youtubeinfo",
+        description = "获取指定 YouTube 视频详情，返回 { tab_id, video }（url/title/author/author_url/duration/duration_seconds/like_count/comment_count/subscriber_count/captions[]，字幕为全文，各计数同时附 *_text 原始文本）"
+    )]
     pub async fn youtubeinfo_tool(
         &self,
         params: Parameters<YoutubeinfoParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
-        let out = youtubeinfo(&mut bridge, &p.url, p.tab_id)
-            .await
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let mut bridge = self.bridge.start_task(p.window_id);
+        let out = youtubeinfo(&mut bridge, &p.url, p.tab_id).await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "youtuberinfo", description = "获取指定 YouTube 频道（youtuber）的视频列表，返回 { tab_id, channel, videos[] }（channel 含 name/url/subscriber_count/subscriber_count_text；videos 每项含 title/url/views/views_count/duration/published/target），最多返回 max 条（默认 10，至少 1）")]
+    #[tool(
+        name = "youtuberinfo",
+        description = "获取指定 YouTube 频道（youtuber）的视频列表，返回 { tab_id, channel, videos[] }（channel 含 name/url/subscriber_count/subscriber_count_text；videos 每项含 title/url/views/views_count/duration/published/target），最多返回 max 条（默认 10，至少 1）"
+    )]
     pub async fn youtuberinfo_tool(
         &self,
         params: Parameters<YoutuberinfoParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
-        let out = youtuberinfo(&mut bridge, &p.channel, p.max.unwrap_or(10), p.tab_id)
-            .await
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let mut bridge = self.bridge.start_task(p.window_id);
+        let out = youtuberinfo(&mut bridge, &p.channel, p.max.unwrap_or(10), p.tab_id).await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "googletrends", description = "Google Trends 趋势查询，返回 { tab_id, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available }。available 表示表格已成功读取，即使 rows 为空也可能为 true；regions 为按地区的搜索热度（rank/region/geo_code/interest）")]
+    #[tool(
+        name = "googletrends",
+        description = "Google Trends 趋势查询，返回 { tab_id, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available }。available 表示表格已成功读取，即使 rows 为空也可能为 true；regions 为按地区的搜索热度（rank/region/geo_code/interest）"
+    )]
     pub async fn googletrends_tool(
         &self,
         params: Parameters<GoogletrendsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
+        let mut bridge = self.bridge.start_task(p.window_id);
         let out = googletrends(
             &mut bridge,
             &p.query,
             p.date.as_deref().unwrap_or("today 1-m"),
             p.geo.as_deref().unwrap_or("Worldwide"),
         )
-        .await
-        .map_err(|e| ErrorData::internal_error(e, None))?;
+        .await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "oldgoogletrends", description = "经典版 Google Trends（legacy）单关键词查询，支持 now 7-d。返回 { tab_id, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available, regions_available }。从页面 DOM 读取趋势表格、切换热门/上升并翻页，trend.date 保留页面时间标签；rising.interest 为 null，change 为增长百分比或 breakout。空榜单 available=true，读取失败为 false 并附 errors。新建标签页，收尾用 close_auto_tabs 清理")]
+    #[tool(
+        name = "oldgoogletrends",
+        description = "经典版 Google Trends（legacy）单关键词查询，支持 now 7-d。返回 { tab_id, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available, regions_available }。从页面 DOM 读取趋势表格、切换热门/上升并翻页，trend.date 保留页面时间标签；rising.interest 为 null，change 为增长百分比或 breakout。空榜单 available=true，读取失败为 false 并附 errors。新建标签页，收尾用 close_auto_tabs 清理"
+    )]
     pub async fn oldgoogletrends_tool(
         &self,
         params: Parameters<OldgoogletrendsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
+        let mut bridge = self.bridge.start_task(p.window_id);
         let out = oldgoogletrends(
             &mut bridge,
             &p.query,
             p.date.as_deref().unwrap_or("today 1-m"),
             p.geo.as_deref().unwrap_or("Worldwide"),
         )
-        .await
-        .map_err(|e| ErrorData::internal_error(e, None))?;
+        .await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "googletrends_compare", description = "Google Trends 关键词对比，返回 { series[] }，每个词一条趋势序列（共享 0-100 刻度，不返回热门/上升表）")]
+    #[tool(
+        name = "googletrends_compare",
+        description = "Google Trends 关键词对比，返回 { series[] }，每个词一条趋势序列（共享 0-100 刻度，不返回热门/上升表）"
+    )]
     pub async fn googletrends_compare_tool(
         &self,
         params: Parameters<GoogletrendsCompareParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
+        let mut bridge = self.bridge.start_task(p.window_id);
         let out = googletrends_compare(
             &mut bridge,
             &p.terms,
             p.date.as_deref().unwrap_or("today 1-m"),
             p.geo.as_deref().unwrap_or("Worldwide"),
         )
-        .await
-        .map_err(|e| ErrorData::internal_error(e, None))?;
+        .await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 
-    #[tool(name = "querydomains", description = "用 Query.Domains 按关键词批量查询域名注册情况与价格，返回 { tab_id, query, tlds, complete, results[] }（每项含 domain/tld/status/available/price/badges；status: available|unavailable|uncertain）")]
+    #[tool(
+        name = "querydomains",
+        description = "用 Query.Domains 按关键词批量查询域名注册情况与价格，返回 { tab_id, query, tlds, complete, results[] }（每项含 domain/tld/status/available/price/badges；status: available|unavailable|uncertain）"
+    )]
     pub async fn querydomains_tool(
         &self,
         params: Parameters<QuerydomainsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let p = params.0;
-        let mut bridge = self.bridge.lock().await;
+        let mut bridge = self.bridge.start_task(p.window_id);
         let out = querydomains(
             &mut bridge,
             &p.query,
             p.tlds.as_deref().unwrap_or(&[]),
             p.tab_id,
         )
-        .await
-        .map_err(|e| ErrorData::internal_error(e, None))?;
+        .await;
+        let _ = bridge.finish_task().await;
+        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
         ok(out)
     }
 }
@@ -1003,10 +1222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let bridge = Bridge::connect_with_client_id(&server, &client_id).await?;
     eprintln!("bridge-mcp connected to {server}");
-    let mcp = BridgeMcp {
-        bridge: Arc::new(Mutex::new(bridge)),
-        client_id,
-    };
+    let mcp = BridgeMcp { bridge, client_id };
 
     // Chrome 生命周期管理：只关本进程拉起的 Chrome。
     // 1) server 断开（server 退出/被杀）：本进程拉起的 Chrome 一并退出

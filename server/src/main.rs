@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -49,6 +49,9 @@ struct WireMessage {
     result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Optional caller deadline in milliseconds; old clients omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
 }
 
 impl WireMessage {
@@ -82,6 +85,7 @@ impl WireMessage {
             success: None,
             result: None,
             error: None,
+            timeout_ms: None,
         }
     }
 
@@ -121,6 +125,17 @@ enum HubMsg {
     TimedOut {
         id: String,
     },
+    /// A request that waited for both the global and window admission gates.
+    Admit {
+        conn_id: u64,
+        extension_id: u64,
+        msg: WireMessage,
+        task_id: Option<String>,
+        window_key: String,
+        timeout: Duration,
+        global_permit: OwnedSemaphorePermit,
+        window_permit: OwnedSemaphorePermit,
+    },
 }
 
 struct Conn {
@@ -130,7 +145,25 @@ struct Conn {
 }
 
 /// id -> (发起请求的 client 连接, 取消超时任务的信号)
-type Pending = HashMap<String, (u64, oneshot::Sender<()>)>;
+struct PendingRequest {
+    client_conn_id: u64,
+    task_id: Option<String>,
+    timed_out: bool,
+    done_tx: oneshot::Sender<()>,
+    // Keeping these permits in Pending makes the resource lifetime explicit:
+    // a slot is released only after a response or timeout is observed.
+    _permits: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>,
+}
+
+type Pending = HashMap<String, PendingRequest>;
+
+struct TaskLease {
+    client_conn_id: u64,
+    window_key: String,
+    uncertain: bool,
+    _global_permit: OwnedSemaphorePermit,
+    _window_permit: OwnedSemaphorePermit,
+}
 
 async fn hub_loop(
     mut rx: mpsc::UnboundedReceiver<HubMsg>,
@@ -140,6 +173,11 @@ async fn hub_loop(
     let mut conns: HashMap<u64, Conn> = HashMap::new();
     let mut extension_id: Option<u64> = None;
     let mut pending: Pending = HashMap::new();
+    let mut tasks: HashMap<String, TaskLease> = HashMap::new();
+    // All clients share this limit. A request must also acquire a per-window
+    // gate below, so one busy window cannot consume the other two slots.
+    let global_slots = std::sync::Arc::new(Semaphore::new(3));
+    let mut window_slots: HashMap<String, std::sync::Arc<Semaphore>> = HashMap::new();
     let mut last_activity = tokio::time::Instant::now();
     // 每秒检查一次空闲状态；丢弃 interval 的首次立即触发
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -163,6 +201,7 @@ async fn hub_loop(
                                 // 新 extension 顶掉旧的：清掉所有未完成请求
                                 conns.remove(&old);
                                 pending.clear();
+                                tasks.clear();
                             }
                         }
                         eprintln!(
@@ -175,26 +214,64 @@ async fn hub_loop(
                         if extension_id == Some(conn_id) {
                             extension_id = None;
                             pending.clear();
+                            tasks.clear();
                         }
                         if conns.remove(&conn_id).is_some() {
                             eprintln!("[hub] connection #{conn_id} disconnected");
                         }
+                        tasks.retain(|_, task| task.client_conn_id != conn_id);
                     }
                     HubMsg::Forward { conn_id, msg } => {
                         match conns.get(&conn_id).map(|c| c.role.clone()) {
                             Some(Role::Client) => {
-                                handle_client(&hub_tx, &conns, extension_id, &mut pending, conn_id, msg)
+                                handle_client(
+                                    &hub_tx,
+                                    &conns,
+                                    extension_id,
+                                    &mut pending,
+                                    &global_slots,
+                                    &mut window_slots,
+                                    &mut tasks,
+                                    conn_id,
+                                    msg,
+                                )
                             }
                             Some(Role::Extension) => {
-                                handle_extension(&conns, &mut pending, conn_id, msg)
+                                handle_extension(&conns, &mut pending, &mut tasks, conn_id, msg)
                             }
                             None => {}
                         }
                     }
                     HubMsg::TimedOut { id } => {
-                        if let Some((client_id, _)) = pending.remove(&id) {
+                        let task_id = pending.get(&id).and_then(|request| request.task_id.clone());
+                        if let Some(task_id) = task_id {
+                            let client_conn_id = pending
+                                .get(&id)
+                                .map(|request| request.client_conn_id);
+                            if let Some(request) = pending.get_mut(&id) {
+                                request.timed_out = true;
+                            }
+                            if let Some(task) = tasks.get_mut(&task_id) {
+                                // Keep the pending entry until the extension
+                                // replies, so task_end cannot release the window
+                                // while the browser may still be executing.
+                                task.uncertain = true;
+                            }
+                            if let Some(client_conn_id) = client_conn_id {
+                                send(
+                                    conns.get(&client_conn_id),
+                                    WireMessage::err(
+                                        &id,
+                                        &format!(
+                                            "timeout: extension did not respond in {}s",
+                                            REQUEST_TIMEOUT.as_secs()
+                                        ),
+                                    ),
+                                );
+                            }
+                        } else if let Some(request) = pending.remove(&id) {
                             send(
-                                conns.get(&client_id),
+                                conns.get(&request.client_conn_id),
                                 WireMessage::err(
                                     &id,
                                     &format!(
@@ -204,6 +281,53 @@ async fn hub_loop(
                                 ),
                             );
                         }
+                    }
+                    HubMsg::Admit { conn_id, extension_id: admitted_ext, msg, task_id, window_key, timeout, global_permit, window_permit } => {
+                        // The extension or client may have disconnected while this
+                        // request was queued. Dropping the permits here returns the
+                        // capacity without sending a stale command.
+                        if extension_id != Some(admitted_ext) || !conns.contains_key(&conn_id) {
+                            send(conns.get(&conn_id), WireMessage::err(
+                                msg.id.as_deref().unwrap_or(""),
+                                "request cancelled while waiting for execution slot",
+                            ));
+                            drop((global_permit, window_permit));
+                            continue;
+                        }
+                        let Some(id) = msg.id.clone() else { continue };
+                        let Some(ext_tx) = conns.get(&admitted_ext).map(|c| c.tx.clone()) else {
+                            drop((global_permit, window_permit));
+                            continue;
+                        };
+                        let (done_tx, done_rx) = oneshot::channel();
+                        pending.insert(id.clone(), PendingRequest {
+                            client_conn_id: conn_id,
+                            task_id: task_id.clone(),
+                            timed_out: false,
+                            done_tx,
+                            _permits: if let Some(task_id) = task_id.clone() {
+                                tasks.insert(task_id, TaskLease {
+                                    client_conn_id: conn_id,
+                                    window_key,
+                                    uncertain: false,
+                                    _global_permit: global_permit,
+                                    _window_permit: window_permit,
+                                });
+                                None
+                            } else {
+                                Some((global_permit, window_permit))
+                            },
+                        });
+                        let _ = ext_tx.send(msg.to_text());
+                        let timeout_tx = hub_tx.clone();
+                        tokio::spawn(async move {
+                            tokio::select! {
+                                _ = done_rx => {}
+                                _ = tokio::time::sleep(timeout) => {
+                                    let _ = timeout_tx.send(HubMsg::TimedOut { id });
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -226,11 +350,20 @@ fn send(conn: Option<&Conn>, msg: WireMessage) {
     }
 }
 
+fn request_timeout(msg: &WireMessage) -> Duration {
+    msg.timeout_ms
+        .map(|ms| Duration::from_millis(ms.clamp(1_000, 10 * 60 * 1_000)))
+        .unwrap_or(REQUEST_TIMEOUT)
+}
+
 fn handle_client(
     hub_tx: &mpsc::UnboundedSender<HubMsg>,
     conns: &HashMap<u64, Conn>,
     extension_id: Option<u64>,
     pending: &mut Pending,
+    global_slots: &std::sync::Arc<Semaphore>,
+    window_slots: &mut HashMap<String, std::sync::Arc<Semaphore>>,
+    tasks: &mut HashMap<String, TaskLease>,
     client_id: u64,
     msg: WireMessage,
 ) {
@@ -248,6 +381,92 @@ fn handle_client(
         return;
     }
 
+    // Read-only inventory calls remain available while all three execution
+    // slots are busy, so a client can discover or inspect windows to decide
+    // where its next task should go.
+    if matches!(
+        msg.method.as_deref(),
+        Some("list_tabs") | Some("list_windows")
+    ) {
+        let Some(ext_id) = extension_id else {
+            send(
+                conns.get(&client_id),
+                WireMessage::err(&id, "no extension connected"),
+            );
+            return;
+        };
+        let Some(ext_tx) = conns.get(&ext_id).map(|c| c.tx.clone()) else {
+            return;
+        };
+        let mut msg = msg;
+        msg.client_id = conns
+            .get(&client_id)
+            .and_then(|conn| conn.client_id.clone());
+        let timeout = request_timeout(&msg);
+        let (done_tx, done_rx) = oneshot::channel();
+        pending.insert(
+            id.clone(),
+            PendingRequest {
+                client_conn_id: client_id,
+                task_id: None,
+                timed_out: false,
+                done_tx,
+                _permits: None,
+            },
+        );
+        let timeout_tx = hub_tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = done_rx => {}
+                _ = tokio::time::sleep(timeout) => {
+                    let _ = timeout_tx.send(HubMsg::TimedOut { id });
+                }
+            }
+        });
+        let _ = ext_tx.send(msg.to_text());
+        return;
+    }
+
+    if msg.method.as_deref() == Some("task_end") {
+        let task_id = msg
+            .params
+            .as_ref()
+            .and_then(|params| params.get("task_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if task_id.is_empty() {
+            send(
+                conns.get(&client_id),
+                WireMessage::err(&id, "task_end requires task_id"),
+            );
+        } else {
+            let owned = tasks
+                .get(task_id)
+                .map(|task| task.client_conn_id == client_id)
+                .unwrap_or(false);
+            let active_request = pending.values().any(|request| {
+                request.client_conn_id == client_id && request.task_id.as_deref() == Some(task_id)
+            });
+            let uncertain = tasks
+                .get(task_id)
+                .map(|task| task.uncertain)
+                .unwrap_or(false);
+            if owned && !active_request && !uncertain {
+                tasks.remove(task_id);
+                send(
+                    conns.get(&client_id),
+                    WireMessage::ok(&id, json!({ "ended": true, "task_id": task_id })),
+                );
+            } else {
+                send(
+                    conns.get(&client_id),
+                    WireMessage::err(&id, "unknown task_id"),
+                );
+            }
+        }
+        return;
+    }
+
     let Some(ext_id) = extension_id else {
         send(
             conns.get(&client_id),
@@ -256,9 +475,6 @@ fn handle_client(
         return;
     };
 
-    let Some(ext_tx) = conns.get(&ext_id).map(|c| c.tx.clone()) else {
-        return;
-    };
     let Some(conn) = conns.get(&client_id) else {
         return;
     };
@@ -266,26 +482,97 @@ fn handle_client(
     // 盖章来源客户端身份，extension 据此记录标签页归属（close_auto_tabs 按 owner 隔离）
     let mut msg = msg;
     msg.client_id = conn.client_id.clone();
-    let _ = ext_tx.send(msg.to_text());
-    let (done_tx, done_rx) = oneshot::channel();
-    pending.insert(id.clone(), (client_id, done_tx));
-
+    // window_id is an optional routing hint. Legacy callers without it are
+    // isolated by client identity, preserving the old per-agent window rule.
+    let window_key = msg
+        .params
+        .as_ref()
+        .and_then(|p| p.get("window_id"))
+        .and_then(Value::as_i64)
+        .map(|wid| format!("window:{wid}"))
+        .unwrap_or_else(|| format!("client:{}", conn.client_id.as_deref().unwrap_or("")));
+    let timeout = request_timeout(&msg);
+    let window_slot = window_slots
+        .entry(window_key.clone())
+        .or_insert_with(|| std::sync::Arc::new(Semaphore::new(1)))
+        .clone();
+    let task_id = msg
+        .params
+        .as_ref()
+        .and_then(|params| params.get("task_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(task_id) = task_id.as_ref() {
+        if let Some(task) = tasks.get(task_id) {
+            if task.client_conn_id != client_id || task.window_key != window_key {
+                send(
+                    conns.get(&client_id),
+                    WireMessage::err(&id, "task_id is bound to another client or window"),
+                );
+                return;
+            }
+            if task.uncertain {
+                send(
+                    conns.get(&client_id),
+                    WireMessage::err(&id, "task is in an unknown execution state after timeout"),
+                );
+                return;
+            }
+            let Some(ext_tx) = conns.get(&ext_id).map(|c| c.tx.clone()) else {
+                return;
+            };
+            let (done_tx, done_rx) = oneshot::channel();
+            pending.insert(
+                id.clone(),
+                PendingRequest {
+                    client_conn_id: client_id,
+                    task_id: Some(task_id.clone()),
+                    timed_out: false,
+                    done_tx,
+                    _permits: None,
+                },
+            );
+            let timeout_tx = hub_tx.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = done_rx => {}
+                _ = tokio::time::sleep(timeout) => {
+                        let _ = timeout_tx.send(HubMsg::TimedOut { id });
+                    }
+                }
+            });
+            let _ = ext_tx.send(msg.to_text());
+            return;
+        }
+    }
+    let global_slot = global_slots.clone();
     let hub_tx = hub_tx.clone();
     tokio::spawn(async move {
-        tokio::select! {
-            // 响应已送达：超时任务直接退出
-            _ = done_rx => {}
-            // 超时：交给 hub 检查该请求是否还在 pending，避免与正常响应竞态
-            _ = tokio::time::sleep(REQUEST_TIMEOUT) => {
-                let _ = hub_tx.send(HubMsg::TimedOut { id });
-            }
-        }
+        let Ok(window_permit) = window_slot.acquire_owned().await else {
+            return;
+        };
+        // Acquire the window first. A task waiting on a busy window must not
+        // consume one of the three global execution slots.
+        let Ok(global_permit) = global_slot.acquire_owned().await else {
+            return;
+        };
+        let _ = hub_tx.send(HubMsg::Admit {
+            conn_id: client_id,
+            extension_id: ext_id,
+            msg,
+            task_id,
+            window_key,
+            timeout,
+            global_permit,
+            window_permit,
+        });
     });
 }
 
 fn handle_extension(
     conns: &HashMap<u64, Conn>,
     pending: &mut Pending,
+    tasks: &mut HashMap<String, TaskLease>,
     conn_id: u64,
     msg: WireMessage,
 ) {
@@ -302,9 +589,16 @@ fn handle_extension(
         return;
     }
 
-    if let Some((client_id, done_tx)) = pending.remove(&id) {
-        drop(done_tx); // 通知超时任务退出
-        send(conns.get(&client_id), msg);
+    if let Some(request) = pending.remove(&id) {
+        drop(request.done_tx); // 通知超时任务退出
+        if let Some(task_id) = request.task_id.as_deref() {
+            if let Some(task) = tasks.get_mut(task_id) {
+                task.uncertain = false;
+            }
+        }
+        if !request.timed_out {
+            send(conns.get(&request.client_conn_id), msg);
+        }
     }
 }
 
@@ -568,5 +862,255 @@ mod tests {
         let resp: WireMessage = serde_json::from_str(&resp).unwrap();
         assert_eq!(resp.success, Some(false));
         assert_eq!(resp.error.as_deref(), Some("no extension connected"));
+    }
+
+    #[tokio::test]
+    async fn limits_global_execution_to_three_tasks() {
+        let (hub_tx, hub_rx) = mpsc::unbounded_channel();
+        tokio::spawn(hub_loop(hub_rx, hub_tx.clone(), Duration::ZERO));
+        let (ext_tx, mut ext_rx) = mpsc::unbounded_channel();
+        hub_tx
+            .send(HubMsg::Register {
+                conn_id: 1,
+                role: Role::Extension,
+                name: "chrome".into(),
+                client_id: None,
+                tx: ext_tx,
+            })
+            .unwrap();
+        let (cli_tx, _cli_rx) = mpsc::unbounded_channel();
+        hub_tx
+            .send(HubMsg::Register {
+                conn_id: 2,
+                role: Role::Client,
+                name: "cli".into(),
+                client_id: Some("cli".into()),
+                tx: cli_tx,
+            })
+            .unwrap();
+
+        for i in 0..4 {
+            hub_tx
+                .send(HubMsg::Forward {
+                    conn_id: 2,
+                    msg: WireMessage {
+                        id: Some(format!("r{i}")),
+                        method: Some("run_script".into()),
+                        params: Some(json!({ "window_id": i })),
+                        ..WireMessage::empty()
+                    },
+                })
+                .unwrap();
+        }
+
+        let mut admitted = Vec::new();
+        for _ in 0..3 {
+            let msg = tokio::time::timeout(Duration::from_millis(500), ext_rx.recv())
+                .await
+                .expect("three tasks should be admitted")
+                .expect("extension channel should stay open");
+            admitted.push(serde_json::from_str::<WireMessage>(&text_of(msg).unwrap()).unwrap());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), ext_rx.recv())
+                .await
+                .is_err()
+        );
+        for msg in admitted {
+            hub_tx
+                .send(HubMsg::Forward {
+                    conn_id: 1,
+                    msg: WireMessage::ok(msg.id.as_deref().unwrap(), json!({})),
+                })
+                .unwrap();
+        }
+        let fourth = tokio::time::timeout(Duration::from_millis(500), ext_rx.recv())
+            .await
+            .expect("fourth task should run after a slot is released")
+            .expect("extension channel should stay open");
+        let fourth: WireMessage = serde_json::from_str(&text_of(fourth).unwrap()).unwrap();
+        assert!(fourth
+            .id
+            .as_deref()
+            .is_some_and(|id| ["r0", "r1", "r2", "r3"].contains(&id)));
+    }
+
+    #[tokio::test]
+    async fn serializes_tasks_on_one_window() {
+        let (hub_tx, hub_rx) = mpsc::unbounded_channel();
+        tokio::spawn(hub_loop(hub_rx, hub_tx.clone(), Duration::ZERO));
+        let (ext_tx, mut ext_rx) = mpsc::unbounded_channel();
+        hub_tx
+            .send(HubMsg::Register {
+                conn_id: 1,
+                role: Role::Extension,
+                name: "chrome".into(),
+                client_id: None,
+                tx: ext_tx,
+            })
+            .unwrap();
+        let (cli_tx, _cli_rx) = mpsc::unbounded_channel();
+        hub_tx
+            .send(HubMsg::Register {
+                conn_id: 2,
+                role: Role::Client,
+                name: "cli".into(),
+                client_id: Some("cli".into()),
+                tx: cli_tx,
+            })
+            .unwrap();
+        for id in ["a", "b"] {
+            hub_tx
+                .send(HubMsg::Forward {
+                    conn_id: 2,
+                    msg: WireMessage {
+                        id: Some(id.into()),
+                        method: Some("navigate".into()),
+                        params: Some(json!({ "window_id": 7 })),
+                        ..WireMessage::empty()
+                    },
+                })
+                .unwrap();
+        }
+        let first = tokio::time::timeout(Duration::from_millis(500), ext_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let first: WireMessage = serde_json::from_str(&text_of(first).unwrap()).unwrap();
+        assert!(matches!(first.id.as_deref(), Some("a" | "b")));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), ext_rx.recv())
+                .await
+                .is_err()
+        );
+        hub_tx
+            .send(HubMsg::Forward {
+                conn_id: 1,
+                msg: WireMessage::ok("a", json!({})),
+            })
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(500), ext_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second: WireMessage = serde_json::from_str(&text_of(second).unwrap()).unwrap();
+        assert!(second
+            .id
+            .as_deref()
+            .is_some_and(|id| ["a", "b"].contains(&id)));
+        assert_ne!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn keeps_a_task_lease_across_multiple_requests() {
+        let (hub_tx, hub_rx) = mpsc::unbounded_channel();
+        tokio::spawn(hub_loop(hub_rx, hub_tx.clone(), Duration::ZERO));
+        let (ext_tx, mut ext_rx) = mpsc::unbounded_channel();
+        hub_tx
+            .send(HubMsg::Register {
+                conn_id: 1,
+                role: Role::Extension,
+                name: "chrome".into(),
+                client_id: None,
+                tx: ext_tx,
+            })
+            .unwrap();
+        let (cli_tx, mut cli_rx) = mpsc::unbounded_channel();
+        hub_tx
+            .send(HubMsg::Register {
+                conn_id: 2,
+                role: Role::Client,
+                name: "cli".into(),
+                client_id: Some("cli".into()),
+                tx: cli_tx,
+            })
+            .unwrap();
+
+        let task_request = |id: &str| WireMessage {
+            id: Some(id.into()),
+            method: Some("run_script".into()),
+            params: Some(json!({ "window_id": 4, "task_id": "task-a" })),
+            ..WireMessage::empty()
+        };
+        hub_tx
+            .send(HubMsg::Forward {
+                conn_id: 2,
+                msg: task_request("one"),
+            })
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_millis(500), ext_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<WireMessage>(&text_of(first).unwrap())
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("one")
+        );
+        hub_tx
+            .send(HubMsg::Forward {
+                conn_id: 1,
+                msg: WireMessage::ok("one", json!({})),
+            })
+            .unwrap();
+        let _ = cli_rx.recv().await;
+
+        hub_tx
+            .send(HubMsg::Forward {
+                conn_id: 2,
+                msg: task_request("two"),
+            })
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(500), ext_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<WireMessage>(&text_of(second).unwrap())
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("two")
+        );
+
+        hub_tx
+            .send(HubMsg::Forward {
+                conn_id: 2,
+                msg: WireMessage {
+                    id: Some("early-end".into()),
+                    method: Some("task_end".into()),
+                    params: Some(json!({ "task_id": "task-a" })),
+                    ..WireMessage::empty()
+                },
+            })
+            .unwrap();
+        let early = text_of(cli_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WireMessage>(&early).unwrap().success,
+            Some(false)
+        );
+        hub_tx
+            .send(HubMsg::Forward {
+                conn_id: 1,
+                msg: WireMessage::ok("two", json!({})),
+            })
+            .unwrap();
+        let _ = cli_rx.recv().await;
+
+        hub_tx
+            .send(HubMsg::Forward {
+                conn_id: 2,
+                msg: WireMessage {
+                    id: Some("end".into()),
+                    method: Some("task_end".into()),
+                    params: Some(json!({ "task_id": "task-a" })),
+                    ..WireMessage::empty()
+                },
+            })
+            .unwrap();
+        let ended = text_of(cli_rx.recv().await.unwrap()).unwrap();
+        assert!(serde_json::from_str::<WireMessage>(&ended).unwrap().success == Some(true));
     }
 }

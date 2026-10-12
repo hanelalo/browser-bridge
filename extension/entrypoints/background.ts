@@ -9,16 +9,18 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectDelayMs = 500;
 let status: 'connecting' | 'connected' | 'disconnected' = 'disconnected';
+// Chrome documents a maximum of two captureVisibleTab calls per second. Keep
+// the limit across windows so three concurrent tasks cannot trip that quota.
+let nextScreenshotAt = 0;
 
 // bridge 自动打开的标签页（new_tab / click --new-tab），tabId -> 创建者 client_id（'' 表示未知/手动场景）。
 // close_auto_tabs 支持按 owner 隔离：多 agent 场景下各自只能清理自己创建的标签页。
 // 存 chrome.storage.session，service worker 重启也不丢；浏览器重启后自然失效。
 let autoTabs: Map<number, string> = new Map();
 
-// click 请求 new_tab 时的捕获窗口：预登记源标签页，onCreated 按 openerTabId 精确关联
-let newTabClickUntil = 0;
-let newTabClickSourceTab: number | null = null;
-let newTabClickOwner = '';
+// click 请求 new_tab 时的捕获窗口：按源标签页记录，允许不同窗口同时点击
+// target="_blank" 链接而不会互相覆盖归属。
+const newTabClickCaptures: Map<number, { until: number; owner: string }> = new Map();
 
 // MCP agent 专用窗口（client_id -> windowId）：agent 的操作默认落在独立窗口里，
 // 不再占用用户当前窗口/当前激活页，也不会抢窗口焦点。
@@ -81,13 +83,10 @@ void (async () => {
     }),
   );
   chrome.tabs.onCreated.addListener((tab) => {
-    if (
-      Date.now() <= newTabClickUntil &&
-      tab.openerTabId != null &&
-      tab.openerTabId === newTabClickSourceTab &&
-      tab.id != null
-    ) {
-      autoTabs.set(tab.id, newTabClickOwner);
+    const capture = tab.openerTabId != null ? newTabClickCaptures.get(tab.openerTabId) : undefined;
+    if (capture && Date.now() <= capture.until && tab.id != null) {
+      autoTabs.set(tab.id, capture.owner);
+      newTabClickCaptures.delete(tab.openerTabId as number);
       void saveAutoTabs();
     }
   });
@@ -243,6 +242,12 @@ async function execute(
   clientId: string,
 ): Promise<unknown> {
   switch (method) {
+    case 'list_windows':
+      return listWindows();
+    case 'new_window':
+      return newWindow(params, clientId);
+    case 'close_window':
+      return closeWindow(params);
     case 'list_tabs':
       return listTabs();
     case 'close_tab':
@@ -299,13 +304,11 @@ async function runPageOp(
   params: Record<string, unknown>,
   clientId: string,
 ): Promise<unknown> {
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   // 预登记：本次点击要求新开标签页时，开 3 秒窗口等 onCreated 按 openerTabId 捕获
   if ((op === 'click' || op === 'click_at') && params.new_tab === true) {
-    newTabClickUntil = Date.now() + 3000;
-    newTabClickSourceTab = tab.id;
-    newTabClickOwner = clientId;
+    newTabClickCaptures.set(tab.id, { until: Date.now() + 3000, owner: clientId });
   }
   try {
     const [result] = await chrome.scripting.executeScript({
@@ -317,9 +320,10 @@ async function runPageOp(
     if (r.__bridge_error) throw new Error(r.__bridge_error);
     // new_tab 锚点：由扩展创建标签页，精确记录并返回新 tab id，便于后续链式操作
     if (typeof r.open_url === 'string' && r.open_url) {
-      const nt = isAgentClient(clientId)
+      const targetWindow = requestedWindowId(params);
+      const nt = isAgentClient(clientId) || targetWindow != null
         ? await chrome.tabs.create({
-            windowId: await ensureAgentWindow(clientId),
+            windowId: targetWindow ?? (await ensureAgentWindow(clientId)),
             url: r.open_url,
             active: true,
           })
@@ -334,7 +338,7 @@ async function runPageOp(
     return { ...r, tab_id: tab.id };
   } catch (err) {
     // 操作失败则作废捕获窗口，避免误记
-    newTabClickUntil = 0;
+    newTabClickCaptures.delete(tab.id);
     throw err;
   }
 }
@@ -343,7 +347,7 @@ async function runPageOp(
 async function pressKey(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
   const result = await runPageOp('press_key', params, clientId);
   if (params.wait_load === true) {
-    const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+    const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
     if (tab.id != null) await waitTabComplete(tab.id);
   }
   return result;
@@ -455,7 +459,7 @@ async function ensureEvalUserScript(): Promise<void> {
  * 低版本退回注册式 userScript + messaging（Chrome 120+，页面需在注册后加载）。
  */
 async function runScript(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   const code = String(params.code ?? '');
   if (!code) throw new Error('run_script requires params.code');
@@ -564,9 +568,31 @@ function isAgentWindow(windowId: number | undefined): boolean {
   return windowId != null && Array.from(agentWindows.values()).includes(windowId);
 }
 
-async function resolveTab(tabId?: number, clientId = ''): Promise<chrome.tabs.Tab> {
-  if (typeof tabId === 'number') return chrome.tabs.get(tabId);
-  if (isAgentClient(clientId)) {
+function requestedWindowId(params: Record<string, unknown>): number | undefined {
+  const value = params.window_id;
+  return typeof value === 'number' && Number.isInteger(value) ? value : undefined;
+}
+
+async function resolveTab(
+  tabId?: number,
+  clientId = '',
+  requestedWindow?: number,
+): Promise<chrome.tabs.Tab> {
+  if (typeof tabId === 'number') {
+    const tab = await chrome.tabs.get(tabId);
+    if (requestedWindow != null && tab.windowId !== requestedWindow) {
+      throw new Error(`tab ${tabId} does not belong to window ${requestedWindow}`);
+    }
+    return tab;
+  }
+  if (requestedWindow != null) {
+    await chrome.windows.get(requestedWindow);
+    const tabs = await chrome.tabs.query({ windowId: requestedWindow });
+    const active = tabs.find((t) => t.active) ?? tabs[0];
+    if (active?.id != null) return active;
+    return chrome.tabs.create({ windowId: requestedWindow, active: true });
+  }
+  if (isAgentClient(clientId) && !agentWindows.has(clientId)) {
     // agent 缺省落在自己的专用窗口：用窗口内激活页，没有就新建
     const windowId = await ensureAgentWindow(clientId);
     const tabs = await chrome.tabs.query({ windowId });
@@ -608,10 +634,53 @@ async function listTabs(): Promise<unknown> {
   }));
 }
 
+async function listWindows(): Promise<unknown> {
+  const windows = await chrome.windows.getAll({ populate: true });
+  return windows.map((win) => ({
+    window_id: win.id ?? null,
+    focused: win.focused === true,
+    type: win.type ?? null,
+    state: win.state ?? null,
+    tabs: (win.tabs ?? []).map((tab) => ({
+      tab_id: tab.id ?? null,
+      url: tab.url ?? null,
+      title: tab.title ?? null,
+      active: tab.active === true,
+    })),
+  }));
+}
+
+async function newWindow(params: Record<string, unknown>, clientId: string): Promise<unknown> {
+  const url = typeof params.url === 'string' && params.url ? params.url : 'chrome://newtab';
+  const win = await chrome.windows.create({
+    url,
+    type: 'normal',
+    focused: params.focused === true,
+  });
+  if (win.id == null) throw new Error('failed to create window');
+  if (isAgentClient(clientId) && !agentWindows.has(clientId)) {
+    agentWindows.set(clientId, win.id);
+    void saveAgentWindows();
+  }
+  const tabs = await chrome.tabs.query({ windowId: win.id });
+  return {
+    window_id: win.id,
+    focused: win.focused === true,
+    tab_id: tabs.find((tab) => tab.active)?.id ?? tabs[0]?.id ?? null,
+  };
+}
+
+async function closeWindow(params: Record<string, unknown>): Promise<unknown> {
+  const windowId = requestedWindowId(params);
+  if (windowId == null) throw new Error('close_window requires window_id');
+  await chrome.windows.remove(windowId);
+  return { closed: true, window_id: windowId };
+}
+
 async function navigate(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
   const url = String(params.url ?? '');
   if (!url) throw new Error('navigate requires params.url');
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   const done = waitForComplete(tab.id);
   await chrome.tabs.update(tab.id, { url });
@@ -621,7 +690,7 @@ async function navigate(params: Record<string, unknown>, clientId = ''): Promise
 }
 
 async function getPageContent(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   const [result] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -636,7 +705,7 @@ async function getPageContent(params: Record<string, unknown>, clientId = ''): P
 
 /** 把指定页面内容转换成标准 Markdown；可选先导航到 url，可选只转换 selector 命中的容器。 */
 async function getPageMarkdown(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
-  let tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  let tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   const url = typeof params.url === 'string' && params.url ? params.url : '';
   if (url) {
     if (tab.id == null) throw new Error('tab has no id');
@@ -688,7 +757,7 @@ function pageMarkdownOp(params: Record<string, unknown>): unknown {
 
 /** 读取页面 a11y tree：注入 a11yTreeOp 到目标标签页运行，返回扁平节点列表。 */
 async function getA11yTree(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   const [result] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -1007,7 +1076,11 @@ function a11yTreeOp(params: Record<string, unknown>): unknown {
  * 返回完整 data URL（data:image/png;base64,... / data:image/jpeg;base64,...）。
  */
 async function screenshot(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const now = Date.now();
+  const waitMs = Math.max(0, nextScreenshotAt - now);
+  nextScreenshotAt = Math.max(now, nextScreenshotAt) + 500;
+  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   const format = params.format === 'jpeg' ? 'jpeg' : 'png';
   let quality: number | undefined;
@@ -1064,7 +1137,7 @@ async function screenshot(params: Record<string, unknown>, clientId = ''): Promi
 
 /** 关闭标签页（默认当前激活标签页）。 */
 async function closeTab(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   await chrome.tabs.remove(tab.id);
   return { closed: true, tab_id: tab.id };
@@ -1117,9 +1190,10 @@ async function closeAgentWindow(
 /** 新建标签页（可指定 URL）。 */
 async function newTab(params: Record<string, unknown>, clientId: string): Promise<unknown> {
   const url = typeof params.url === 'string' && params.url ? params.url : undefined;
-  const tab = isAgentClient(clientId)
+  const targetWindow = requestedWindowId(params);
+  const tab = isAgentClient(clientId) || targetWindow != null
     ? await chrome.tabs.create({
-        windowId: await ensureAgentWindow(clientId),
+        windowId: targetWindow ?? (await ensureAgentWindow(clientId)),
         url,
         active: true,
       })
@@ -1133,7 +1207,7 @@ async function newTab(params: Record<string, unknown>, clientId: string): Promis
 
 /** 切换到指定标签页并聚焦所在窗口（默认当前激活标签页）。 */
 async function activateTab(params: Record<string, unknown>, clientId = ''): Promise<unknown> {
-  const tab = await resolveTab(params.tab_id as number | undefined, clientId);
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
   if (tab.id == null) throw new Error('tab has no id');
   await chrome.tabs.update(tab.id, { active: true });
   // 专用窗口内的激活不抢 OS 焦点；用户手动指定的普通窗口保持原行为

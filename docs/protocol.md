@@ -14,15 +14,36 @@
 - `role: "extension"`：浏览器插件连接。一个 server 同时只服务一个 extension，后连的会顶掉先连的。
 - `role: "client"`：指令发起方，可以有多个。
 
+## 并发与窗口
+
+server 对所有 client 统一调度：最多同时执行 3 个任务；同一个浏览器窗口同时只能执行 1 个任务。等待窗口空闲的任务不占用全局执行名额，因此一个忙窗口不会阻塞其他空闲窗口。
+
+请求可以带 `window_id`，省略时沿用当前 client 的默认窗口：
+
+```json
+{ "id": "w1", "method": "list_tabs", "params": { "window_id": 5 } }
+```
+
+多步流程（包括站点配方）会带同一个 `task_id`。server 首次看到它时取得全局槽和窗口槽，并一直持有到 `task_end`；流程中的后续请求不会被其他任务插入。流程结束必须发送：
+
+```json
+{ "id": "end-1", "method": "task_end", "params": { "task_id": "task-123" } }
+```
+
+单条指令没有 `task_id`，只占用窗口槽直到该指令响应或超时。连接断开时 server 会回收该 client 的任务租约；执行结果未知时不会自动重放有副作用的指令。
+
+窗口管理方法：`list_windows`、`new_window`、`close_window`。`list_windows` 返回窗口及其标签页；`new_window` 返回 `window_id`，之后可把它传给任意支持窗口路由的工具。
+
 ## 请求
 
 ```json
-{ "id": "abc-123", "method": "navigate", "params": { "url": "https://example.com" } }
+{ "id": "abc-123", "method": "navigate", "params": { "url": "https://example.com" }, "timeout_ms": 35000 }
 ```
 
 - `id`：字符串，客户端自定义，用于配对响应。
 - `method`：指令名。
 - `params`：指令参数（可省略）。
+- `timeout_ms`：可选，请求级执行截止时间；旧 client 省略时 server 使用 60 秒默认值。
 
 ## 响应
 

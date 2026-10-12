@@ -215,7 +215,11 @@ pub async fn youtubesearch(
         max = max,
     );
     let fetched = bridge
-        .request("yt2", "run_script", json!({ "code": fetch_script, "tab_id": tab_id }))
+        .request(
+            "yt2",
+            "run_script",
+            json!({ "code": fetch_script, "tab_id": tab_id }),
+        )
         .await?;
     let res = fetched.get("result").cloned().unwrap_or(Value::Null);
     if !res.get("ok").and_then(Value::as_bool).unwrap_or(false) {

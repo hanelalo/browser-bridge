@@ -41,6 +41,7 @@ client 连接失败时会**自动拉起 bridge-server**（需要已构建的二�
 ```sh
 cd client
 cargo run -- list-tabs
+cargo run -- --window 5 list-tabs
 cargo run -- navigate https://example.com
 cargo run -- click '#submit'
 cargo run -- set_value '#username' alice
@@ -332,7 +333,8 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
 - 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
-- 每个 agent（`mcp-` 身份）自动拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；
+- 每个 agent（`mcp-` 身份）默认拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；工具也可传 `window_id` 在多个窗口间调度。
+- server 全局最多同时执行 3 个任务，同一个窗口同时只执行 1 个任务；站点配方会持有窗口任务租约直到流程结束。
 - 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
 - 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare`。
 

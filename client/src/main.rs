@@ -29,6 +29,10 @@ struct Cli {
     #[arg(long, default_value = "ws://127.0.0.1:9225", env = "BRIDGE_SERVER")]
     server: String,
 
+    /// 指定任务使用的浏览器窗口 id；省略时使用当前 client 的默认窗口
+    #[arg(long, env = "BRIDGE_WINDOW_ID")]
+    window: Option<i32>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -55,8 +59,23 @@ impl Target {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 列出浏览器窗口及其标签页
+    ListWindows,
     /// 列出所有标签页
     ListTabs,
+    /// 创建浏览器窗口
+    NewWindow {
+        /// 新窗口打开的 URL
+        url: Option<String>,
+        /// 是否让新窗口获得前台焦点
+        #[arg(long)]
+        focused: bool,
+    },
+    /// 关闭指定浏览器窗口
+    CloseWindow {
+        #[arg(long)]
+        window: i32,
+    },
     /// 关闭标签页（默认当前激活标签页）
     CloseTab {
         /// 指定标签页 id（默认当前激活标签页）
@@ -392,8 +411,16 @@ enum Cmd {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if let Some(window_id) = cli.window {
+        std::env::set_var("BRIDGE_WINDOW_ID", window_id.to_string());
+    }
     let (method, params) = match cli.cmd {
+        Cmd::ListWindows => ("list_windows", json!({})),
         Cmd::ListTabs => ("list_tabs", json!({})),
+        Cmd::NewWindow { url, focused } => {
+            ("new_window", json!({ "url": url, "focused": focused }))
+        }
+        Cmd::CloseWindow { window } => ("close_window", json!({ "window_id": window })),
         Cmd::CloseTab { tab } => ("close_tab", json!({ "tab_id": tab })),
         Cmd::CloseAutoTabs => ("close_auto_tabs", json!({})),
         Cmd::NewTab { url } => ("new_tab", json!({ "url": url })),
@@ -601,10 +628,7 @@ async fn main() {
             }
             ("press_key", params)
         }
-        Cmd::RunScript { code, tab } => (
-            "run_script",
-            json!({ "code": code, "tab_id": tab }),
-        ),
+        Cmd::RunScript { code, tab } => ("run_script", json!({ "code": code, "tab_id": tab })),
         Cmd::Scroll {
             dx,
             dy,
@@ -625,11 +649,7 @@ async fn main() {
             }
             ("scroll", params)
         }
-        Cmd::SetValue {
-            target,
-            value,
-            tab,
-        } => (
+        Cmd::SetValue { target, value, tab } => (
             "set_value",
             json!({ "target": target.spec(), "value": value, "tab_id": tab }),
         ),
@@ -664,10 +684,7 @@ async fn main() {
             }
             ("select_option", params)
         }
-        Cmd::Clear { target, tab } => (
-            "clear",
-            json!({ "target": target.spec(), "tab_id": tab }),
-        ),
+        Cmd::Clear { target, tab } => ("clear", json!({ "target": target.spec(), "tab_id": tab })),
         Cmd::GetValue { target, tab } => (
             "get_value",
             json!({ "target": target.spec(), "tab_id": tab }),

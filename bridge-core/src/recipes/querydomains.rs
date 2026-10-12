@@ -117,8 +117,7 @@ fn extract_script(query: &str, expected: usize) -> String {
     rows,
     complete: streamDone && rows.length >= want,
   }};
-}})()"#
-        ,
+}})()"#,
         m = serde_json::to_string(&marker).unwrap_or_else(|_| "\"\"".into())
     )
 }
