@@ -10,6 +10,7 @@ use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::oldgoogletrends::oldgoogletrends;
+use bridge_core::recipes::oldgoogletrends::oldgoogletrends_compare;
 use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
@@ -162,6 +163,18 @@ enum Cmd {
     Oldgoogletrends {
         /// 单个搜索关键词
         query: String,
+        /// 时间范围（如 now 7-d / now 1-d / today 1-m / all / YYYY-MM-DD YYYY-MM-DD）
+        #[arg(long, default_value = "today 1-m")]
+        date: String,
+        /// 地区代码（默认 Worldwide；如 US / CN）
+        #[arg(long, default_value = "Worldwide")]
+        geo: String,
+    },
+    /// 对比多个关键词在经典版 Google Trends（legacy）的走势（共享 0-100 刻度）
+    OldgoogletrendsCompare {
+        /// 关键词（可多个；逗号分隔的写法也会被拆分）
+        #[arg(required = true)]
+        terms: Vec<String>,
         /// 时间范围（如 now 7-d / now 1-d / today 1-m / all / YYYY-MM-DD YYYY-MM-DD）
         #[arg(long, default_value = "today 1-m")]
         date: String,
@@ -519,6 +532,24 @@ async fn main() {
         Cmd::Oldgoogletrends { query, date, geo } => {
             let mut bridge = bridge.start_task(cli.window);
             let result = oldgoogletrends(&mut bridge, &query, &date, &geo).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
+                Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Cmd::OldgoogletrendsCompare { terms, date, geo } => {
+            let terms: Vec<String> = terms
+                .iter()
+                .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut bridge = bridge.start_task(cli.window);
+            let result = oldgoogletrends_compare(&mut bridge, &terms, &date, &geo).await;
             let cleanup = bridge.finish_task().await;
             match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),

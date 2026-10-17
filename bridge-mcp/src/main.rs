@@ -9,6 +9,7 @@ use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
 use bridge_core::recipes::googletrends::googletrends_compare;
 use bridge_core::recipes::oldgoogletrends::oldgoogletrends;
+use bridge_core::recipes::oldgoogletrends::oldgoogletrends_compare;
 use bridge_core::recipes::querydomains::querydomains;
 use bridge_core::recipes::redditsearch::redditsearch;
 use bridge_core::recipes::youtubeinfo::youtubeinfo;
@@ -379,6 +380,24 @@ struct GoogletrendsParams {
 struct OldgoogletrendsParams {
     /// 单个搜索关键词
     query: String,
+    /// 时间范围（默认 today 1-m；支持 now 7-d / now 1-d / today 3-m / all / YYYY-MM-DD YYYY-MM-DD）
+    #[serde(default)]
+    date: Option<String>,
+    /// 地区代码（默认 Worldwide，空字符串也表示全球；如 US / CN）
+    #[serde(default)]
+    geo: Option<String>,
+    #[serde(default)]
+    window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct OldgoogletrendsCompareParams {
+    /// 要对比的关键词列表（2 个及以上效果最好，最多 5 个）
+    terms: Vec<String>,
     /// 时间范围（默认 today 1-m；支持 now 7-d / now 1-d / today 3-m / all / YYYY-MM-DD YYYY-MM-DD）
     #[serde(default)]
     date: Option<String>,
@@ -1461,6 +1480,36 @@ impl BridgeMcp {
         let out = oldgoogletrends(
             &mut bridge,
             &p.query,
+            p.date.as_deref().unwrap_or("today 1-m"),
+            p.geo.as_deref().unwrap_or("Worldwide"),
+        )
+        .await;
+        finish_recipe(&bridge, out, owns_task).await
+    }
+
+    #[tool(
+        name = "oldgoogletrends_compare",
+        description = "经典版 Google Trends（legacy）关键词对比，支持 now 7-d。返回 { series[] }，每个词一条趋势序列（共享 0-100 刻度，无数据词整列为 0；trend.date 保留页面时间标签，不返回热门/上升表）。从经典页面 DOM 表格读取，新建标签页，收尾用 close_auto_tabs 清理"
+    )]
+    pub async fn oldgoogletrends_compare_tool(
+        &self,
+        params: Parameters<OldgoogletrendsCompareParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
+        let p = params.0;
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
+        let out = oldgoogletrends_compare(
+            &mut bridge,
+            &p.terms,
             p.date.as_deref().unwrap_or("today 1-m"),
             p.geo.as_deref().unwrap_or("Worldwide"),
         )

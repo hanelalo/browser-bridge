@@ -56,6 +56,7 @@ cargo run -- youtuberinfo '@xiaojunpodcast' --max 20
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 cargo run -- oldgoogletrends 'ai image detector' --date 'now 7-d' --geo Worldwide
 cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m'
+cargo run -- oldgoogletrends-compare 'coffee' 'tea' --date 'now 7-d'
 cargo run -- get-page-markdown --url https://example.com
 cargo run -- get-a11y-tree
 cargo run -- screenshot --out shot.png
@@ -94,6 +95,7 @@ cargo run -- screenshot --out shot.png
 | `googletrends '<关键词>' [--date] [--geo]` | Google Trends，输出 `{ tab_id, trend[], top[], rising[], regions[] }` |
 | `oldgoogletrends '<关键词>' [--date] [--geo]` | 经典版 Google Trends（legacy），读取页面趋势表格 + 完整热门/上升查询 + 地区热度 |
 | `googletrends-compare <词1> <词2>... [--date] [--geo]` | Google Trends 多词对比，输出 `{ series[] }` |
+| `oldgoogletrends-compare <词1> <词2>... [--date] [--geo]` | 经典版 Google Trends（legacy）多词对比，共享 0-100 刻度，支持 `now 7-d`，输出 `{ series[] }` |
 | `querydomains '<关键词>' [--tlds 'com,ai,xyz']` | Query.Domains 批量查域名注册情况与价格，输出 `{ results[] }`（每项含 domain / tld / status / available / price / badges） |
 
 多数指令支持 `--tab <id>` 指定标签页，默认操作当前激活页。
@@ -299,6 +301,22 @@ cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m' --geo Wor
 
 `terms` 也可用逗号分隔写成一个参数（`'ai image,GPTs'`）。`--date` / `--geo` 与 `googletrends` 一致。
 
+### oldgoogletrends-compare
+
+经典版（legacy）多关键词走势对比，返回 `{ tab_id, terms[], date, geo, series[] }`，每个关键词一条趋势序列，**共享 0-100 刻度**，不返回热门/上升查询表：
+
+```sh
+cargo run -- oldgoogletrends-compare 'coffee' 'tea' --date 'now 7-d' --geo Worldwide
+```
+
+- 打开带 `legacy` 参数的 `/trends/explore` 对比页，读取趋势数据表（表头 `x + y1..yN`，词序与 `terms` 一致），页面上的均值摘要表不参与输出。
+- `--date` 与 `oldgoogletrends` 一致（支持 `now 7-d` 等）；`--geo` 默认 `Worldwide`，经典版全球查询不发送 `geo=Worldwide`。
+- `trend` 每条 `{ date, value }`，`date` 保留页面时间标签（如 `10月10日 13:00`）；无数据词整列为 `0`；页面提示数据不足时各词 `trend` 为空数组并附 `note`。
+- 最多 5 个关键词，单个词内不能含逗号；CLI 的 `terms` 同样支持逗号分隔写法。
+- 每次新建标签页；成功后可用 `close-auto-tabs` 清理，失败时自动关闭本次标签页。
+
+配方验证：`cargo test --workspace` 和 `node --test bridge-core/tests/oldgoogletrends_compare.test.mjs`。
+
 ### client 结构
 
 ```text
@@ -313,7 +331,8 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
     ├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
     ├── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
     ├── oldgoogletrends.rs # 经典版 Trends（参数校验 + 浏览器编排）
-    └── oldgoogletrends.js # 经典版 DOM 读取 + 切换/翻页
+    ├── oldgoogletrends.js # 经典版 DOM 读取 + 切换/翻页
+    └── oldgoogletrends_compare.js # 经典版多词对比 DOM 读取
 client/                   # CLI（薄壳：子命令 + 分发）
 bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
@@ -336,7 +355,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - 每个 agent（`mcp-` 身份）默认拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；工具也可传 `window_id` 在多个窗口间调度。
 - server 全局最多同时执行 3 个任务，同一个窗口同时只执行 1 个任务；站点配方会持有窗口任务租约直到流程结束。
 - MCP 结束或断线不会退出共享 Chrome；窗口清理由显式工具调用发起，并经过 server 调度；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare` / `oldgoogletrends_compare`。
 
 #### 配置示例
 
