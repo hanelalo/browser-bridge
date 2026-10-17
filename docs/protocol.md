@@ -1,4 +1,4 @@
-# Browser Bridge 协议 v1
+# Browser Bridge 协议
 
 传输层为 WebSocket，默认地址 `ws://127.0.0.1:9225`。所有消息均为 JSON 文本帧。
 
@@ -7,30 +7,38 @@
 连接建立后，第一条消息必须是 hello：
 
 ```json
-{ "type": "hello", "role": "extension", "name": "chrome-main" }
+{ "type": "hello", "role": "extension", "name": "chrome-main", "client_id": "browser-session-instance-id" }
 { "type": "hello", "role": "client", "name": "bridge-client" }
 ```
 
-- `role: "extension"`：浏览器插件连接。一个 server 同时只服务一个 extension，后连的会顶掉先连的。
+- `role: "extension"`：浏览器插件连接。一个 server 同时只服务一个 extension。扩展的 `client_id` 保存在 `chrome.storage.session`，WebSocket 和 service worker 重连时保持不变；仍有未确认执行时拒绝其他浏览器实例接管。
 - `role: "client"`：指令发起方，可以有多个。
 
 ## 并发与窗口
 
 server 对所有 client 统一调度：最多同时执行 3 个任务；同一个浏览器窗口同时只能执行 1 个任务。等待窗口空闲的任务不占用全局执行名额，因此一个忙窗口不会阻塞其他空闲窗口。
 
-请求可以带 `window_id`，省略时沿用当前 client 的默认窗口：
+请求可以带 `window_id` 或 `tab_id`。server 先让扩展解析真实窗口和标签页，再按物理窗口排队。不同 client 指向同一标签页、默认窗口或显式窗口都会使用同一把窗口锁。MCP 省略时沿用专用窗口，CLI 省略时使用当前窗口：
 
 ```json
 { "id": "w1", "method": "list_tabs", "params": { "window_id": 5 } }
 ```
 
-多步流程（包括站点配方）会带同一个 `task_id`。server 首次看到它时取得全局槽和窗口槽，并一直持有到 `task_end`；流程中的后续请求不会被其他任务插入。流程结束必须发送：
+多步流程（包括 MCP 和 CLI 站点配方）携带同一个 `task_id`。server 首次看到它时建立租约，在获得全局额度和窗口后开始执行；同一任务的指令也逐条执行。后续请求默认固定到任务窗口和最近返回的标签页，显式改用其他窗口会报错。流程结束发送：
 
 ```json
 { "id": "end-1", "method": "task_end", "params": { "task_id": "task-123" } }
 ```
 
-单条指令没有 `task_id`，只占用窗口槽直到该指令响应或超时。连接断开时 server 会回收该 client 的任务租约；执行结果未知时不会自动重放有副作用的指令。
+单条指令没有 `task_id` 时，server 自动包装为短任务。超时、取消和连接断开都会取消尚未执行的工作；已发给浏览器的操作进入 `closing` 状态，继续占用窗口和全局额度，收到实际完成响应后自动释放。`task_end` 在有在途指令时返回 `ended:false,state:"closing"`，可以幂等调用；不会提前释放，也不需要在迟到响应后再调用一次。
+
+任务管理方法：`task_begin` 申请窗口租约并返回 `task_id`、`window_id`、`tab_id`；`task_status` 查询状态；`task_end` 结束；`task_cancel` 取消。后三者接收 `{ "task_id": "..." }`。租约绑定发起连接，`agent_id` 可选，用于标记同一 MCP 会话下的逻辑 agent。已获得额度但没有在途操作的租约空闲 60 秒后回收。
+
+server 内部使用 `_resolve_target` 固定执行目标、`_sync_executions` 核对执行记录。客户端不能调用这些内部方法。扩展仅持久化未完成操作的请求 ID、窗口和运行状态，操作完成后删除记录，不缓存结果。断线导致结果丢失时，由调用方重新发起请求；重连同步仅用于核对窗口占用和释放额度。server 重启后也会接管扩展报告的未完成操作，保留对应额度。若 service worker 重启且不能确认页面脚本是否结束，会继续保留资源；手动关闭涉及的窗口后可确认释放。
+
+客户端传输重连后，旧连接签发或使用过的任务不能继续执行新指令，必须重新申请任务；不会把旧 `task_id` 静默绑定到默认窗口。新任务仍需等待旧操作实际结束后才能获得资源。默认专用窗口的首次创建也经过全局额度调度。
+
+`close_auto_tabs` 会固定本次清理涉及的标签页，并同时取得所有涉及窗口的锁；等待期间不会占用部分窗口。`close_agent_window` 同样按真实窗口调度。排队过程中标签页移到其他窗口会报错，不会越过原有许可操作新窗口。
 
 窗口管理方法：`list_windows`、`new_window`、`close_window`。`list_windows` 返回窗口及其标签页；`new_window` 返回 `window_id`，之后可把它传给任意支持窗口路由的工具。
 
@@ -43,7 +51,10 @@ server 对所有 client 统一调度：最多同时执行 3 个任务；同一�
 - `id`：字符串，客户端自定义，用于配对响应。
 - `method`：指令名。
 - `params`：指令参数（可省略）。
-- `timeout_ms`：可选，请求级执行截止时间；旧 client 省略时 server 使用 60 秒默认值。
+- `timeout_ms`：可选，请求总预算，包含目标解析、排队和执行；旧 client 省略时使用 60 秒。
+- `deadline_ms`：可选，Unix 毫秒绝对截止时间；bridge-core 自动填写，避免排队和重连后执行调用方已超时的请求。server 使用它和 `timeout_ms` 中较早的期限。
+
+升级此版本时须同时重建 Rust 二进制和扩展，并在浏览器中重新加载扩展。server 在扩展完成执行记录核对前暂停新执行；不支持目标解析/记录核对的旧扩展不能执行浏览器指令。
 
 ## 响应
 

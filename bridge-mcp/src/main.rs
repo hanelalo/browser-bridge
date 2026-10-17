@@ -3,9 +3,7 @@
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex as StdMutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bridge_core::recipes::googlesearch::googlesearch;
 use bridge_core::recipes::googletrends::googletrends;
@@ -17,8 +15,7 @@ use bridge_core::recipes::youtubeinfo::youtubeinfo;
 use bridge_core::recipes::youtuberinfo::youtuberinfo;
 use bridge_core::recipes::youtubesearch::youtubesearch;
 use bridge_core::target;
-use bridge_core::transport::{connect_bridge_no_spawn, Bridge};
-use futures_util::StreamExt;
+use bridge_core::transport::Bridge;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData};
 use rmcp::tool_handler;
@@ -29,18 +26,6 @@ use serde_json::{json, Value};
 
 const DEFAULT_SERVER: &str = "ws://127.0.0.1:9225";
 const NO_EXTENSION_ERR: &str = "no extension connected";
-/// 空闲多久关闭本进程拉起的 Chrome（可被 BRIDGE_CLOSE_CHROME_IDLE_SECS 覆盖，便于测试）
-const IDLE_CLOSE_CHROME_SECS: u64 = 600;
-const WATCHDOG_TICK_SECS: u64 = 30;
-
-/// 本进程是否拉起了 Chrome（只在启动前 Chrome 未运行时置 true，之后只关自己拉起的）。
-static LAUNCHED_CHROME: AtomicBool = AtomicBool::new(false);
-static LAST_ACTIVITY: OnceLock<StdMutex<Instant>> = OnceLock::new();
-
-fn last_activity() -> &'static StdMutex<Instant> {
-    LAST_ACTIVITY.get_or_init(|| StdMutex::new(Instant::now()))
-}
-
 #[derive(Clone)]
 struct BridgeMcp {
     bridge: Bridge,
@@ -55,6 +40,10 @@ struct TabParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -64,6 +53,10 @@ struct NavigateParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -80,6 +73,10 @@ struct TargetParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -99,6 +96,10 @@ struct ClickParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -109,6 +110,10 @@ struct ClickAtParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -130,6 +135,10 @@ struct PressKeyParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -150,6 +159,10 @@ struct ScrollParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -164,6 +177,10 @@ struct SetValueParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -180,6 +197,10 @@ struct CheckParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -202,6 +223,10 @@ struct SelectOptionParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -223,6 +248,10 @@ struct ScrapeParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -232,6 +261,10 @@ struct RunScriptParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -240,6 +273,10 @@ struct NewTabParams {
     url: Option<String>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -249,6 +286,10 @@ struct GooglesearchParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -258,6 +299,10 @@ struct RedditsearchParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -276,6 +321,10 @@ struct YoutubesearchParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -286,6 +335,10 @@ struct YoutubeinfoParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -299,6 +352,10 @@ struct YoutuberinfoParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -312,6 +369,10 @@ struct GoogletrendsParams {
     geo: Option<String>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -326,6 +387,10 @@ struct OldgoogletrendsParams {
     geo: Option<String>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -340,6 +405,10 @@ struct GoogletrendsCompareParams {
     geo: Option<String>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -353,6 +422,10 @@ struct QuerydomainsParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -370,6 +443,10 @@ struct GetPageMarkdownParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -384,6 +461,10 @@ struct A11yTreeParams {
     tab_id: Option<i32>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -401,11 +482,19 @@ struct ScreenshotParams {
     foreground: Option<bool>,
     #[serde(default)]
     window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct WindowParams {
     window_id: i32,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -414,6 +503,21 @@ struct NewWindowParams {
     url: Option<String>,
     #[serde(default)]
     focused: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct TaskParams {
+    task_id: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct BeginTaskParams {
+    #[serde(default)]
+    window_id: Option<i32>,
+    #[serde(default)]
+    tab_id: Option<i32>,
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 // ---------- 工具辅助 ----------
@@ -430,7 +534,6 @@ async fn call_value(
     method: &str,
     params: Value,
 ) -> Result<Value, ErrorData> {
-    *last_activity().lock().unwrap() = Instant::now();
     match bridge.request(id, method, params.clone()).await {
         Ok(v) => return Ok(v),
         Err(e) if e.contains(NO_EXTENSION_ERR) => {
@@ -470,6 +573,26 @@ async fn call(
 ) -> Result<CallToolResult, ErrorData> {
     let value = call_value(bridge, id, method, params).await?;
     ok(value)
+}
+
+async fn finish_recipe(
+    bridge: &Bridge,
+    out: Result<Value, String>,
+    owns_task: bool,
+) -> Result<CallToolResult, ErrorData> {
+    let cleanup = if owns_task {
+        bridge.finish_task().await.map(|_| ())
+    } else {
+        Ok(())
+    };
+    match (out, cleanup) {
+        (Ok(value), Ok(())) => ok(value),
+        (Err(error), _) => Err(ErrorData::internal_error(error, None)),
+        (Ok(_), Err(error)) => Err(ErrorData::internal_error(
+            format!("recipe completed but task cleanup failed: {error}"),
+            None,
+        )),
+    }
 }
 
 /// 检查 Chrome 是否已在运行。
@@ -516,7 +639,6 @@ fn ensure_chrome_running() -> Result<(), String> {
         .map_err(|e| format!("拉起 Chrome 失败: {e}"))?;
     if status.success() {
         eprintln!("[bridge-mcp] open returned success");
-        LAUNCHED_CHROME.store(true, Ordering::SeqCst);
         Ok(())
     } else {
         eprintln!("[bridge-mcp] open returned failure");
@@ -541,33 +663,10 @@ fn ensure_chrome_running() -> Result<(), String> {
             .spawn()
             .is_ok()
         {
-            LAUNCHED_CHROME.store(true, Ordering::SeqCst);
             return Ok(());
         }
     }
     Err("拉起 Chrome 失败：未在 PATH 中找到 chrome/chromium".to_string())
-}
-
-/// 优雅退出 Chrome（会话保留，下次启动恢复）。只在确认是本进程拉起的 Chrome 时调用。
-#[cfg(target_os = "macos")]
-fn quit_chrome() {
-    let _ = Command::new("osascript")
-        .args(["-e", "quit app \"Google Chrome\""])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-#[cfg(not(target_os = "macos"))]
-fn quit_chrome() {
-    for bin in [
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-    ] {
-        let _ = Command::new("pkill").args(["-x", bin]).status();
-    }
 }
 
 fn with_target(
@@ -591,6 +690,75 @@ fn with_target(
 
 #[tool_router]
 impl BridgeMcp {
+    #[tool(
+        name = "begin_task",
+        description = "申请窗口任务租约；等待 server 全局额度和窗口空闲后返回 task_id。后续工具传入该 task_id，结束时调用 end_task；空闲租约 60 秒后释放"
+    )]
+    pub async fn begin_task(
+        &self,
+        params: Parameters<BeginTaskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        call(
+            &self.bridge,
+            "begin",
+            "task_begin",
+            serde_json::to_value(params.0)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "end_task",
+        description = "结束任务；若浏览器仍在执行，进入 closing 状态，确认执行结束后自动释放额度和窗口"
+    )]
+    pub async fn end_task(
+        &self,
+        params: Parameters<TaskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        call(
+            &self.bridge,
+            "end",
+            "task_end",
+            json!({"task_id":params.0.task_id}),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "cancel_task",
+        description = "取消排队工作并停止接受新指令；在途浏览器操作确认结束后才释放窗口"
+    )]
+    pub async fn cancel_task(
+        &self,
+        params: Parameters<TaskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        call(
+            &self.bridge,
+            "cancel",
+            "task_cancel",
+            json!({"task_id":params.0.task_id}),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "task_status",
+        description = "查询任务的排队、运行、closing 或 finished 状态"
+    )]
+    pub async fn task_status(
+        &self,
+        params: Parameters<TaskParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        call(
+            &self.bridge,
+            "status",
+            "task_status",
+            json!({"task_id":params.0.task_id}),
+        )
+        .await
+    }
+
     #[tool(name = "list_windows", description = "列出浏览器窗口及其标签页")]
     pub async fn list_windows(&self) -> Result<CallToolResult, ErrorData> {
         call(&self.bridge, "lw", "list_windows", json!({})).await
@@ -619,8 +787,13 @@ impl BridgeMcp {
         &self,
         params: Parameters<WindowParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            Some(params.0.window_id),
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         call(
-            &self.bridge,
+            &bridge,
             "cw",
             "close_window",
             json!({ "window_id": params.0.window_id }),
@@ -638,8 +811,13 @@ impl BridgeMcp {
         &self,
         params: Parameters<TabParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         call(
-            &self.bridge,
+            &bridge,
             "ct",
             "close_tab",
             json!({ "tab_id": params.0.tab_id, "window_id": params.0.window_id }),
@@ -680,8 +858,13 @@ impl BridgeMcp {
         &self,
         params: Parameters<NewTabParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         call(
-            &self.bridge,
+            &bridge,
             "nt",
             "new_tab",
             json!({ "url": params.0.url, "window_id": params.0.window_id }),
@@ -694,8 +877,13 @@ impl BridgeMcp {
         &self,
         params: Parameters<TabParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         call(
-            &self.bridge,
+            &bridge,
             "at",
             "activate_tab",
             json!({ "tab_id": params.0.tab_id, "window_id": params.0.window_id }),
@@ -708,9 +896,14 @@ impl BridgeMcp {
         &self,
         params: Parameters<NavigateParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         call(
-            &self.bridge,
+            &bridge,
             "nav",
             "navigate",
             json!({ "url": p.url, "tab_id": p.tab_id, "window_id": p.window_id }),
@@ -723,6 +916,11 @@ impl BridgeMcp {
         &self,
         params: Parameters<ClickParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         if let Some(t) = p.timeout {
@@ -731,7 +929,7 @@ impl BridgeMcp {
         if p.new_tab.unwrap_or(false) {
             v["new_tab"] = json!(true);
         }
-        call(&self.bridge, "clk", "click", v).await
+        call(&bridge, "clk", "click", v).await
     }
 
     #[tool(name = "click_at", description = "按页面坐标点击")]
@@ -739,9 +937,14 @@ impl BridgeMcp {
         &self,
         params: Parameters<ClickAtParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         call(
-            &self.bridge,
+            &bridge,
             "cxy",
             "click_at",
             json!({ "x": p.x, "y": p.y, "tab_id": p.tab_id, "window_id": p.window_id }),
@@ -757,6 +960,11 @@ impl BridgeMcp {
         &self,
         params: Parameters<PressKeyParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = json!({ "key": p.key, "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(m) = p.modifiers {
@@ -768,7 +976,7 @@ impl BridgeMcp {
         if let Some(t) = p.target {
             v["target"] = target::spec(p.by.as_deref().unwrap_or("css"), &t, p.index);
         }
-        call(&self.bridge, "pk", "press_key", v).await
+        call(&bridge, "pk", "press_key", v).await
     }
 
     #[tool(name = "scroll", description = "滚动窗口或指定容器")]
@@ -776,6 +984,11 @@ impl BridgeMcp {
         &self,
         params: Parameters<ScrollParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = json!({
             "dx": p.dx.unwrap_or(0.0),
@@ -787,7 +1000,7 @@ impl BridgeMcp {
         if let Some(t) = p.target {
             v["target"] = target::spec(p.by.as_deref().unwrap_or("css"), &t, p.index);
         }
-        call(&self.bridge, "scr", "scroll", v).await
+        call(&bridge, "scr", "scroll", v).await
     }
 
     #[tool(
@@ -798,10 +1011,15 @@ impl BridgeMcp {
         &self,
         params: Parameters<SetValueParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         v["value"] = json!(p.value);
-        call(&self.bridge, "sv", "set_value", v).await
+        call(&bridge, "sv", "set_value", v).await
     }
 
     #[tool(name = "check", description = "勾选/取消 checkbox 或 radio")]
@@ -809,10 +1027,15 @@ impl BridgeMcp {
         &self,
         params: Parameters<CheckParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         v["checked"] = json!(p.checked.unwrap_or(true));
-        call(&self.bridge, "chk", "check", v).await
+        call(&bridge, "chk", "check", v).await
     }
 
     #[tool(name = "select_option", description = "选中 <select> 的某个选项")]
@@ -820,6 +1043,11 @@ impl BridgeMcp {
         &self,
         params: Parameters<SelectOptionParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         if let Some(x) = p.option_value {
@@ -831,7 +1059,7 @@ impl BridgeMcp {
         if let Some(x) = p.option_index {
             v["index"] = json!(x);
         }
-        call(&self.bridge, "so", "select_option", v).await
+        call(&bridge, "so", "select_option", v).await
     }
 
     #[tool(name = "clear", description = "清空 input/textarea/contenteditable")]
@@ -839,9 +1067,14 @@ impl BridgeMcp {
         &self,
         params: Parameters<TargetParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         call(
-            &self.bridge,
+            &bridge,
             "clr",
             "clear",
             with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id),
@@ -854,9 +1087,14 @@ impl BridgeMcp {
         &self,
         params: Parameters<TargetParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         call(
-            &self.bridge,
+            &bridge,
             "gv",
             "get_value",
             with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id),
@@ -872,6 +1110,11 @@ impl BridgeMcp {
         &self,
         params: Parameters<ScrapeParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = json!({ "item": p.item, "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(f) = p.fields {
@@ -890,7 +1133,7 @@ impl BridgeMcp {
         if let Some(t) = p.timeout {
             v["timeout"] = json!(t);
         }
-        call(&self.bridge, "scp", "scrape", v).await
+        call(&bridge, "scp", "scrape", v).await
     }
 
     #[tool(
@@ -901,9 +1144,14 @@ impl BridgeMcp {
         &self,
         params: Parameters<RunScriptParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         call(
-            &self.bridge,
+            &bridge,
             "rs",
             "run_script",
             json!({ "code": p.code, "tab_id": p.tab_id, "window_id": p.window_id }),
@@ -916,8 +1164,13 @@ impl BridgeMcp {
         &self,
         params: Parameters<TabParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         call(
-            &self.bridge,
+            &bridge,
             "gpc",
             "get_page_content",
             json!({ "tab_id": params.0.tab_id, "window_id": params.0.window_id }),
@@ -933,6 +1186,11 @@ impl BridgeMcp {
         &self,
         params: Parameters<GetPageMarkdownParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = json!({ "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(u) = p.url {
@@ -944,7 +1202,7 @@ impl BridgeMcp {
         if p.full.unwrap_or(false) {
             v["full"] = json!(true);
         }
-        call(&self.bridge, "gpm", "get_page_markdown", v).await
+        call(&bridge, "gpm", "get_page_markdown", v).await
     }
 
     #[tool(
@@ -955,12 +1213,17 @@ impl BridgeMcp {
         &self,
         params: Parameters<A11yTreeParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = json!({ "tab_id": p.tab_id, "window_id": p.window_id, "max_nodes": p.max_nodes.unwrap_or(500) });
         if p.include_hidden.unwrap_or(false) {
             v["include_hidden"] = json!(true);
         }
-        call(&self.bridge, "a11y", "get_a11y_tree", v).await
+        call(&bridge, "a11y", "get_a11y_tree", v).await
     }
 
     #[tool(
@@ -971,6 +1234,11 @@ impl BridgeMcp {
         &self,
         params: Parameters<ScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
         let mut v = json!({ "tab_id": p.tab_id, "window_id": p.window_id });
         if let Some(f) = p.format {
@@ -982,7 +1250,7 @@ impl BridgeMcp {
         if p.foreground.unwrap_or(false) {
             v["foreground"] = json!(true);
         }
-        let value = call_value(&self.bridge, "ss", "screenshot", v).await?;
+        let value = call_value(&bridge, "ss", "screenshot", v).await?;
         // 图片：从 data URL 中拆出纯 base64，作为标准 MCP image content block 返回
         let data_url = value
             .get("data")
@@ -1020,12 +1288,20 @@ impl BridgeMcp {
         &self,
         params: Parameters<GooglesearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = googlesearch(&mut bridge, &p.query, p.tab_id).await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1036,12 +1312,20 @@ impl BridgeMcp {
         &self,
         params: Parameters<RedditsearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = redditsearch(&mut bridge, &p.query, p.tab_id).await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1052,8 +1336,18 @@ impl BridgeMcp {
         &self,
         params: Parameters<YoutubesearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = youtubesearch(
             &mut bridge,
             &p.query,
@@ -1063,9 +1357,7 @@ impl BridgeMcp {
             p.tab_id,
         )
         .await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1076,12 +1368,20 @@ impl BridgeMcp {
         &self,
         params: Parameters<YoutubeinfoParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = youtubeinfo(&mut bridge, &p.url, p.tab_id).await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1092,12 +1392,20 @@ impl BridgeMcp {
         &self,
         params: Parameters<YoutuberinfoParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = youtuberinfo(&mut bridge, &p.channel, p.max.unwrap_or(10), p.tab_id).await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1108,8 +1416,18 @@ impl BridgeMcp {
         &self,
         params: Parameters<GoogletrendsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = googletrends(
             &mut bridge,
             &p.query,
@@ -1117,9 +1435,7 @@ impl BridgeMcp {
             p.geo.as_deref().unwrap_or("Worldwide"),
         )
         .await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1130,8 +1446,18 @@ impl BridgeMcp {
         &self,
         params: Parameters<OldgoogletrendsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = oldgoogletrends(
             &mut bridge,
             &p.query,
@@ -1139,9 +1465,7 @@ impl BridgeMcp {
             p.geo.as_deref().unwrap_or("Worldwide"),
         )
         .await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1152,8 +1476,18 @@ impl BridgeMcp {
         &self,
         params: Parameters<GoogletrendsCompareParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = googletrends_compare(
             &mut bridge,
             &p.terms,
@@ -1161,9 +1495,7 @@ impl BridgeMcp {
             p.geo.as_deref().unwrap_or("Worldwide"),
         )
         .await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 
     #[tool(
@@ -1174,8 +1506,18 @@ impl BridgeMcp {
         &self,
         params: Parameters<QuerydomainsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
         let p = params.0;
-        let mut bridge = self.bridge.start_task(p.window_id);
+        let owns_task = !bridge.has_task();
+        let mut bridge = if owns_task {
+            bridge.start_task(p.window_id)
+        } else {
+            bridge
+        };
         let out = querydomains(
             &mut bridge,
             &p.query,
@@ -1183,9 +1525,7 @@ impl BridgeMcp {
             p.tab_id,
         )
         .await;
-        let _ = bridge.finish_task().await;
-        let out = out.map_err(|e| ErrorData::internal_error(e, None))?;
-        ok(out)
+        finish_recipe(&bridge, out, owns_task).await
     }
 }
 
@@ -1224,58 +1564,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("bridge-mcp connected to {server}");
     let mcp = BridgeMcp { bridge, client_id };
 
-    // Chrome 生命周期管理：只关本进程拉起的 Chrome。
-    // 1) server 断开（server 退出/被杀）：本进程拉起的 Chrome 一并退出
-    // 2) 空闲超时（默认 10 分钟）：退出本进程拉起的 Chrome
-    // 3) MCP 会话结束（stdio 关闭）：main 末尾清理
-    {
-        let server_watch = server.clone();
-        let watch_client = format!("mcp-watch-{}", std::process::id());
-        tokio::spawn(async move {
-            loop {
-                match connect_bridge_no_spawn(&server_watch, &watch_client).await {
-                    Ok(mut ws) => {
-                        // 一直读到断开：server 退出/被杀时流结束
-                        while let Some(_msg) = ws.next().await {}
-                        eprintln!("[bridge-mcp] bridge server closed");
-                        if LAUNCHED_CHROME.swap(false, Ordering::SeqCst) {
-                            eprintln!("[bridge-mcp] closing Chrome launched by this MCP process");
-                            quit_chrome();
-                        }
-                    }
-                    Err(_) => {
-                        // server 没在运行，无需处理
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-        });
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(WATCHDOG_TICK_SECS)).await;
-                if !LAUNCHED_CHROME.load(Ordering::SeqCst) {
-                    continue;
-                }
-                let idle_secs = std::env::var("BRIDGE_CLOSE_CHROME_IDLE_SECS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(IDLE_CLOSE_CHROME_SECS);
-                if last_activity().lock().unwrap().elapsed() >= Duration::from_secs(idle_secs) {
-                    eprintln!("[bridge-mcp] idle {idle_secs}s, closing Chrome launched by this MCP process");
-                    quit_chrome();
-                    LAUNCHED_CHROME.store(false, Ordering::SeqCst);
-                }
-            }
-        });
-    }
-
+    // Chrome is shared by concurrent clients. A process ending must never
+    // quit the browser used by other tasks; task leases drain on disconnect.
     let service = mcp.serve(rmcp::transport::stdio()).await?;
     let waiting = service.waiting().await;
-    // MCP 会话结束（stdio 关闭）：关掉本进程拉起的 Chrome
-    if LAUNCHED_CHROME.swap(false, Ordering::SeqCst) {
-        eprintln!("[bridge-mcp] MCP session ended, closing Chrome launched by this MCP process");
-        quit_chrome();
-    }
     waiting?;
     Ok(())
 }

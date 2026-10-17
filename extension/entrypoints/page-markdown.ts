@@ -44,6 +44,7 @@ function makePageMarkdownConverter(): (params: PageMarkdownParams) => unknown {
   };
 
   // 非正文元素直接移除（脚本/样式/表单控件/媒体等）
+  service.remove((node) => node.nodeName.toLowerCase() === 'svg');
   service.remove([
     'script',
     'style',
@@ -53,7 +54,6 @@ function makePageMarkdownConverter(): (params: PageMarkdownParams) => unknown {
     'object',
     'embed',
     'canvas',
-    'svg',
     'audio',
     'video',
     'source',
@@ -136,13 +136,13 @@ function makePageMarkdownConverter(): (params: PageMarkdownParams) => unknown {
       } else {
         // 自动正文提取：Readability（Firefox 阅读模式同款）在 DOM 副本上抽取主内容，
         // 抽不到或内容太少时退回整页转换
-        let article: { content: string; textContent: string } | null = null;
+        let article: { content?: string | null; textContent?: string | null } | null = null;
         try {
           article = new Readability(document.cloneNode(true) as Document).parse();
         } catch {
           article = null;
         }
-        if (article && (article.textContent ?? '').trim().length >= 50) {
+        if (article && article.content != null && (article.textContent ?? '').trim().length >= 50) {
           source = article.content;
         } else {
           if (!document.body) throw new Error('page has no body');

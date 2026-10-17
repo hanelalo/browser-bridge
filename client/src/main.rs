@@ -414,6 +414,13 @@ async fn main() {
     if let Some(window_id) = cli.window {
         std::env::set_var("BRIDGE_WINDOW_ID", window_id.to_string());
     }
+    let bridge = match Bridge::connect(&cli.server).await {
+        Ok(bridge) => bridge,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
+    };
     let (method, params) = match cli.cmd {
         Cmd::ListWindows => ("list_windows", json!({})),
         Cmd::ListTabs => ("list_tabs", json!({})),
@@ -426,14 +433,10 @@ async fn main() {
         Cmd::NewTab { url } => ("new_tab", json!({ "url": url })),
         Cmd::ActivateTab { tab } => ("activate_tab", json!({ "tab_id": tab })),
         Cmd::Googlesearch { query, tab } => {
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match googlesearch(&mut bridge, &query, tab).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = googlesearch(&mut bridge, &query, tab).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -443,14 +446,10 @@ async fn main() {
             return;
         }
         Cmd::Redditsearch { query, tab } => {
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match redditsearch(&mut bridge, &query, tab).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = redditsearch(&mut bridge, &query, tab).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -466,14 +465,10 @@ async fn main() {
             max,
             tab,
         } => {
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match youtubesearch(&mut bridge, &query, &time, &sort, max, tab).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = youtubesearch(&mut bridge, &query, &time, &sort, max, tab).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -483,14 +478,10 @@ async fn main() {
             return;
         }
         Cmd::Youtubeinfo { url, tab } => {
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match youtubeinfo(&mut bridge, &url, tab).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = youtubeinfo(&mut bridge, &url, tab).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -500,14 +491,10 @@ async fn main() {
             return;
         }
         Cmd::Youtuberinfo { channel, max, tab } => {
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match youtuberinfo(&mut bridge, &channel, max, tab).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = youtuberinfo(&mut bridge, &channel, max, tab).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -517,14 +504,10 @@ async fn main() {
             return;
         }
         Cmd::Googletrends { query, date, geo } => {
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match googletrends(&mut bridge, &query, &date, &geo).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = googletrends(&mut bridge, &query, &date, &geo).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -534,14 +517,10 @@ async fn main() {
             return;
         }
         Cmd::Oldgoogletrends { query, date, geo } => {
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match oldgoogletrends(&mut bridge, &query, &date, &geo).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = oldgoogletrends(&mut bridge, &query, &date, &geo).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -556,14 +535,10 @@ async fn main() {
                 .flat_map(|t| t.split(',').map(|s| s.trim().to_string()))
                 .filter(|s| !s.is_empty())
                 .collect();
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match googletrends_compare(&mut bridge, &terms, &date, &geo).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = googletrends_compare(&mut bridge, &terms, &date, &geo).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -574,14 +549,10 @@ async fn main() {
         }
         Cmd::Querydomains { query, tlds, tab } => {
             let tlds = tlds.unwrap_or_default();
-            let mut bridge = match Bridge::connect(&cli.server).await {
-                Ok(b) => b,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    std::process::exit(1);
-                }
-            };
-            match querydomains(&mut bridge, &query, &tlds, tab).await {
+            let mut bridge = bridge.start_task(cli.window);
+            let result = querydomains(&mut bridge, &query, &tlds, tab).await;
+            let cleanup = bridge.finish_task().await;
+            match result.and_then(|out| cleanup.map(|_| out)) {
                 Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -770,13 +741,7 @@ async fn main() {
                 params["quality"] = json!(q);
             }
             if let Some(path) = out {
-                let mut bridge = match Bridge::connect(&cli.server).await {
-                    Ok(b) => b,
-                    Err(err) => {
-                        eprintln!("error: {err}");
-                        std::process::exit(1);
-                    }
-                };
+                let bridge = bridge.clone();
                 match bridge.request("ss", "screenshot", params).await {
                     Ok(result) => match save_screenshot(&path, &result) {
                         Ok(()) => {
@@ -804,15 +769,14 @@ async fn main() {
         }
     };
 
-    if let Err(err) = run(&cli.server, method, params).await {
+    if let Err(err) = run(&bridge, method, params).await {
         eprintln!("error: {err}");
         std::process::exit(1);
     }
 }
 
 /// 发送单个通用指令并打印结果。
-async fn run(server: &str, method: &str, params: Value) -> Result<(), String> {
-    let mut bridge = Bridge::connect(server).await?;
+async fn run(bridge: &Bridge, method: &str, params: Value) -> Result<(), String> {
     let result = bridge.request("c1", method, params).await?;
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     Ok(())

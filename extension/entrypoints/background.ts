@@ -25,6 +25,27 @@ const newTabClickCaptures: Map<number, { until: number; owner: string }> = new M
 // MCP agent 专用窗口（client_id -> windowId）：agent 的操作默认落在独立窗口里，
 // 不再占用用户当前窗口/当前激活页，也不会抢窗口焦点。
 let agentWindows: Map<string, number> = new Map();
+const creatingAgentWindows = new Map<string, Promise<number>>();
+let extensionInstanceId = '';
+type ExecutionRecord = {
+  state: 'running' | 'unknown';
+  window_ids: number[];
+};
+const executions = new Map<string, ExecutionRecord>();
+let journalWrites: Promise<void> = Promise.resolve();
+
+function saveExecutionJournal(): Promise<void> {
+  // Only unfinished execution metadata survives worker restarts. Results can
+  // contain screenshots or full pages and must never enter session storage.
+  const snapshot = Array.from(executions, ([id, record]) => [id, {
+    state: record.state, window_ids: record.window_ids,
+  }]);
+  const write = journalWrites.catch(() => {}).then(() =>
+    chrome.storage.session.set({ bridgeExecutions: snapshot }),
+  );
+  journalWrites = write;
+  return write;
+}
 
 /** 判断是否是 MCP agent 连接（bridge-mcp 使用 mcp- 前缀的稳定身份）；CLI 保持原行为。 */
 function isAgentClient(clientId: string): boolean {
@@ -47,7 +68,20 @@ async function saveAgentWindows(): Promise<void> {
   }
 }
 
-void (async () => {
+let stateReady: Promise<void>;
+async function restoreState(): Promise<void> {
+  const saved = await chrome.storage.session.get(['bridgeInstanceId', 'bridgeExecutions']);
+  extensionInstanceId = typeof saved.bridgeInstanceId === 'string'
+    ? saved.bridgeInstanceId : crypto.randomUUID();
+  for (const [id, record] of (saved.bridgeExecutions ?? []) as Array<[string, { state: string; window_ids: number[] }]>) {
+    if (record.state === 'running' || record.state === 'unknown') {
+      executions.set(id, { state: 'unknown', window_ids: record.window_ids });
+    }
+  }
+  // Replace the old result cache before any other write, even if it already
+  // fills the quota. Preserve unfinished operations so their locks survive.
+  await saveExecutionJournal();
+  await chrome.storage.session.set({ bridgeInstanceId: extensionInstanceId });
   try {
     const got = await chrome.storage.session.get('autoTabs');
     if (Array.isArray(got.autoTabs)) {
@@ -94,6 +128,8 @@ void (async () => {
     if (autoTabs.delete(id)) void saveAutoTabs();
   });
   chrome.windows.onRemoved.addListener((windowId) => {
+    if (ws) send(ws, { method: '_window_removed', params: { window_id: windowId } });
+    void syncExecutions([]).catch(() => {});
     let changed = false;
     for (const [cid, wid] of agentWindows) {
       if (wid === windowId) {
@@ -103,7 +139,7 @@ void (async () => {
     }
     if (changed) void saveAgentWindows();
   });
-})();
+}
 
 function setStatus(next: typeof status): void {
   status = next;
@@ -112,6 +148,10 @@ function setStatus(next: typeof status): void {
 }
 
 function connect(): void {
+  if (!extensionInstanceId) {
+    void stateReady.then(connect);
+    return;
+  }
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -123,7 +163,7 @@ function connect(): void {
 
   socket.onopen = () => {
     reconnectDelayMs = 1000;
-    socket.send(JSON.stringify({ type: 'hello', role: 'extension', name: 'browser-bridge' }));
+    socket.send(JSON.stringify({ type: 'hello', role: 'extension', name: 'browser-bridge', client_id: extensionInstanceId }));
     setStatus('connected');
     startPing(socket);
     void closeOffscreen();
@@ -224,9 +264,57 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
   }
 
   try {
+    await stateReady;
     const clientId = typeof msg.client_id === 'string' ? msg.client_id : '';
-    const result = await execute(msg.method, msg.params ?? {}, clientId);
-    send(socket, { id: msg.id, success: true, result });
+    if (msg.method === '_resolve_target') {
+      const p = msg.params ?? {};
+      const result = await resolveTarget(String(p.method ?? ''), (p.params ?? {}) as Record<string, unknown>, clientId);
+      send(socket, { id: msg.id, success: true, result });
+      return;
+    }
+    if (msg.method === '_sync_executions') {
+      const ids = Array.isArray(msg.params?.ids) ? msg.params.ids as string[] : [];
+      send(socket, { id: msg.id, success: true, result: await syncExecutions(ids) });
+      return;
+    }
+    if (msg.method === 'list_tabs' || msg.method === 'list_windows') {
+      send(socket, { id: msg.id, success: true, result: await execute(msg.method, msg.params ?? {}, clientId) });
+      return;
+    }
+    if (executions.has(msg.id)) return; // An unfinished dispatch is still occupying its window.
+    const windows = msg.params?._window_ids;
+    if (!Array.isArray(windows) || windows.some((id) => typeof id !== 'number')) {
+      throw new Error('server must resolve and admit the target before execution; update bridge-server');
+    }
+    if (executions.size >= 3) {
+      throw new Error('browser execution capacity is still reserved by running or unresolved operations');
+    }
+    for (const record of executions.values()) {
+      if (record.window_ids.some((id) => windows.includes(id))) {
+        throw new Error('window still has an executing or unresolved browser operation');
+      }
+    }
+    // Persist before starting browser code. After a service-worker restart a
+    // running entry becomes unknown, never assumed to have stopped.
+    const record: ExecutionRecord = { state: 'running', window_ids: windows as number[] };
+    executions.set(msg.id, record);
+    try {
+      await saveExecutionJournal();
+    } catch (error) {
+      executions.delete(msg.id);
+      throw error;
+    }
+    let response: Record<string, unknown>;
+    try {
+      await validateExecutionScope(msg.method, msg.params ?? {}, record.window_ids);
+      const result = await execute(msg.method, msg.params ?? {}, clientId);
+      response = { id: msg.id, success: true, result };
+    } catch (error) {
+      response = { id: msg.id, success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    executions.delete(msg.id);
+    await saveExecutionJournal().catch(() => {});
+    send(ws?.readyState === WebSocket.OPEN ? ws : socket, response);
   } catch (err) {
     send(socket, {
       id: msg.id,
@@ -236,12 +324,112 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
   }
 }
 
+/** Resolve physical resources before the server attempts admission. The
+ * returned params pin tabs/windows and freeze cleanup targets. */
+async function resolveTarget(
+  method: string,
+  input: Record<string, unknown>,
+  clientId: string,
+): Promise<{ window_ids: number[]; params: Record<string, unknown>; needs_default_window?: boolean }> {
+  const params = Object.fromEntries(Object.entries(input).filter(([key]) => !key.startsWith('_')));
+  for (const field of ['window_id', 'tab_id']) {
+    if (params[field] != null && (typeof params[field] !== 'number' || !Number.isInteger(params[field]) || (params[field] as number) < 0)) {
+      throw new Error(`${field} must be a non-negative integer`);
+    }
+  }
+  if (method === 'new_window') {
+    if (params.task_id != null) throw new Error('new_window must be called outside an existing window task');
+    return { window_ids: [], params };
+  }
+  if (method === 'close_auto_tabs') {
+    const owner = typeof params.owner === 'string' && params.owner ? params.owner : null;
+    const targetWindow = requestedWindowId(params);
+    const tabs = (await Promise.all(Array.from(autoTabs).filter(([, cid]) => owner == null || cid === owner)
+      .map(([id]) => chrome.tabs.get(id).catch(() => null))))
+      .filter((tab): tab is chrome.tabs.Tab => tab != null && (targetWindow == null || tab.windowId === targetWindow));
+    params._tabs = tabs.map((tab) => ({ tab_id: tab.id, window_id: tab.windowId }));
+    return { window_ids: Array.from(new Set(tabs.map((tab) => tab.windowId))).sort((a, b) => a - b), params };
+  }
+  if (method === 'close_agent_window') {
+    const owner = typeof params.owner === 'string' && params.owner ? params.owner : clientId;
+    const windowId = agentWindows.get(owner);
+    params._resolved = true;
+    params.window_id = windowId ?? null;
+    return { window_ids: windowId == null ? [] : [windowId], params };
+  }
+  if (method === 'close_window') {
+    const windowId = requestedWindowId(params);
+    if (windowId == null) throw new Error('close_window requires window_id');
+    await chrome.windows.get(windowId);
+    return { window_ids: [windowId], params };
+  }
+  const pageMethods = ['task_begin', 'new_tab', 'close_tab', 'activate_tab', 'navigate', 'click', 'click_at',
+    'press_key', 'run_script', 'scroll', 'set_value', 'check', 'select_option', 'clear', 'get_value',
+    'scrape', 'get_page_content', 'get_page_markdown', 'get_a11y_tree', 'screenshot'];
+  if (!pageMethods.includes(method)) throw new Error(`unknown method: ${method}`);
+  // Target discovery must stay read-only. Ask the server to schedule default
+  // window creation under its global limit, then resolve again.
+  if (params.tab_id == null && requestedWindowId(params) == null && isAgentClient(clientId)) {
+    const known = agentWindows.get(clientId);
+    const existing = known == null ? null : await chrome.windows.get(known).catch(() => null);
+    if (!existing) return { window_ids: [], params, needs_default_window: true };
+  }
+  const tab = await resolveTab(params.tab_id as number | undefined, clientId, requestedWindowId(params));
+  if (tab.id == null) throw new Error('tab has no id');
+  params.tab_id = tab.id;
+  params.window_id = tab.windowId;
+  return { window_ids: [tab.windowId], params };
+}
+
+async function validateExecutionScope(method: string, params: Record<string, unknown>, windows: number[]): Promise<void> {
+  if (method === 'new_window' || method === '_ensure_default_window') return;
+  if (method === 'close_auto_tabs') {
+    for (const target of params._tabs as Array<{ tab_id: number; window_id: number }>) {
+      const tab = await chrome.tabs.get(target.tab_id).catch(() => null);
+      if (tab && (tab.windowId !== target.window_id || !windows.includes(tab.windowId))) {
+        throw new Error('cleanup target moved to another window; resolve again');
+      }
+    }
+    return;
+  }
+  if (params.window_id == null && method === 'close_agent_window') return;
+  const windowId = requestedWindowId(params);
+  if (windowId == null || !windows.includes(windowId)) throw new Error('target window does not match execution permit');
+  if (params.tab_id != null) {
+    const tab = await chrome.tabs.get(params.tab_id as number);
+    if (tab.windowId !== windowId) throw new Error('target tab moved to another window; resolve again');
+  }
+}
+
+async function syncExecutions(ids: string[]): Promise<unknown> {
+  const present = new Set((await chrome.windows.getAll()).map((win) => win.id));
+  const result: Array<Record<string, unknown>> = [];
+  for (const id of new Set([...ids, ...executions.keys()])) {
+    const entry = executions.get(id);
+    if (entry && entry.window_ids.length > 0 && entry.window_ids.every((wid) => !present.has(wid))) {
+      executions.delete(id);
+      result.push({ id, state: 'closed' });
+    } else {
+      // A missing ID has no unfinished execution. The caller may submit a new
+      // request; there is no completed result to recover or replay.
+      result.push({ id, ...(entry ?? { state: 'finished' }) });
+    }
+  }
+  await saveExecutionJournal();
+  return { executions: result };
+}
+
 async function execute(
   method: string,
   params: Record<string, unknown>,
   clientId: string,
 ): Promise<unknown> {
   switch (method) {
+    case '_ensure_default_window': {
+      const windowId = await ensureAgentWindow(clientId);
+      const tabs = await chrome.tabs.query({ windowId });
+      return { window_id: windowId, tab_id: tabs.find((tab) => tab.active)?.id ?? tabs[0]?.id ?? null };
+    }
     case 'list_windows':
       return listWindows();
     case 'new_window':
@@ -316,7 +504,7 @@ async function runPageOp(
       func: pageOp,
       args: [op, params],
     });
-    const r = (result?.result ?? {}) as { __bridge_error?: string };
+    const r = (result?.result ?? {}) as { __bridge_error?: string; open_url?: string };
     if (r.__bridge_error) throw new Error(r.__bridge_error);
     // new_tab 锚点：由扩展创建标签页，精确记录并返回新 tab id，便于后续链式操作
     if (typeof r.open_url === 'string' && r.open_url) {
@@ -543,6 +731,16 @@ async function activeTab(): Promise<chrome.tabs.Tab> {
 
 /** 取某个 agent 的专用窗口，不存在则惰性创建（focused:false，不抢 OS 焦点）。 */
 async function ensureAgentWindow(clientId: string): Promise<number> {
+  await stateReady;
+  const pending = creatingAgentWindows.get(clientId);
+  if (pending) return pending;
+  const create = ensureAgentWindowOnce(clientId);
+  creatingAgentWindows.set(clientId, create);
+  try { return await create; }
+  finally { creatingAgentWindows.delete(clientId); }
+}
+
+async function ensureAgentWindowOnce(clientId: string): Promise<number> {
   const existing = agentWindows.get(clientId);
   if (existing != null) {
     try {
@@ -557,7 +755,7 @@ async function ensureAgentWindow(clientId: string): Promise<number> {
     type: 'normal',
     focused: false,
   });
-  if (win.id == null) throw new Error('failed to create agent window');
+  if (win?.id == null) throw new Error('failed to create agent window');
   agentWindows.set(clientId, win.id);
   void saveAgentWindows();
   return win.id;
@@ -592,7 +790,7 @@ async function resolveTab(
     if (active?.id != null) return active;
     return chrome.tabs.create({ windowId: requestedWindow, active: true });
   }
-  if (isAgentClient(clientId) && !agentWindows.has(clientId)) {
+  if (isAgentClient(clientId)) {
     // agent 缺省落在自己的专用窗口：用窗口内激活页，没有就新建
     const windowId = await ensureAgentWindow(clientId);
     const tabs = await chrome.tabs.query({ windowId });
@@ -657,7 +855,7 @@ async function newWindow(params: Record<string, unknown>, clientId: string): Pro
     type: 'normal',
     focused: params.focused === true,
   });
-  if (win.id == null) throw new Error('failed to create window');
+  if (win?.id == null) throw new Error('failed to create window');
   if (isAgentClient(clientId) && !agentWindows.has(clientId)) {
     agentWindows.set(clientId, win.id);
     void saveAgentWindows();
@@ -998,7 +1196,7 @@ function a11yTreeOp(params: Record<string, unknown>): unknown {
       const parts: string[] = [];
       let node: Element | null = el;
       while (node && node.parentElement && node !== document.body) {
-        const parent = node.parentElement;
+        const parent: HTMLElement = node.parentElement;
         const tag = node.tagName.toLowerCase();
         let nth = 1;
         for (const sib of parent.children) {
@@ -1146,7 +1344,9 @@ async function closeTab(params: Record<string, unknown>, clientId = ''): Promise
 /** 关闭 bridge 自动打开的标签页；params.owner 指定时只关该创建者的（多 agent 隔离）。 */
 async function closeAutoTabs(params: Record<string, unknown>): Promise<unknown> {
   const owner = typeof params?.owner === 'string' && params.owner ? params.owner : null;
-  const entries = Array.from(autoTabs.entries()).filter(([, o]) => owner === null || o === owner);
+  const prepared = new Set((params._tabs as Array<{ tab_id: number }> | undefined)?.map((t) => t.tab_id));
+  const entries = Array.from(autoTabs.entries()).filter(([id, o]) =>
+    (owner === null || o === owner) && (params._tabs == null || prepared.has(id)));
   const ids = entries.map(([id]) => id);
   const existing = (
     await Promise.all(ids.map((id) => chrome.tabs.get(id).catch(() => null)))
@@ -1168,7 +1368,7 @@ async function closeAgentWindow(
   clientId = '',
 ): Promise<unknown> {
   const owner = typeof params?.owner === 'string' && params.owner ? params.owner : clientId;
-  const windowId = agentWindows.get(owner);
+  const windowId = params._resolved === true ? requestedWindowId(params) : agentWindows.get(owner);
   if (windowId == null) {
     return { closed: false, window_id: null };
   }
@@ -1655,7 +1855,9 @@ chrome.runtime.onMessage.addListener(
 );
 
 export default defineBackground(() => {
-  connect();
-  // worker 每次启动都确保唤醒源存在（若已连上，onopen 会立刻关掉它）
-  void ensureOffscreen();
+  stateReady = restoreState();
+  void stateReady.then(() => {
+    connect();
+    void ensureOffscreen();
+  }).catch((error) => console.error('bridge state initialization failed', error));
 });

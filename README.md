@@ -335,7 +335,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
 - 每个 agent（`mcp-` 身份）默认拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；工具也可传 `window_id` 在多个窗口间调度。
 - server 全局最多同时执行 3 个任务，同一个窗口同时只执行 1 个任务；站点配方会持有窗口任务租约直到流程结束。
-- 本进程拉起的 Chrome 会在空闲 10 分钟（`BRIDGE_CLOSE_CHROME_IDLE_SECS` 可覆盖）或 server/会话结束时自动退出，自己开的 Chrome 不受影响；
+- MCP 结束或断线不会退出共享 Chrome；窗口清理由显式工具调用发起，并经过 server 调度；
 - 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare`。
 
 #### 配置示例
@@ -426,8 +426,23 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 | 插件连接地址 | `ws://127.0.0.1:9225` | 构建时 `WXT_PUBLIC_BRIDGE_URL=ws://... pnpm build` |
 | client 服务地址 | `ws://127.0.0.1:9225` | `--server` 或环境变量 `BRIDGE_SERVER` |
 | client 自动拉起 | 已构建的 `bridge-server` | `BRIDGE_SERVER_BIN` 指定路径，否则按同目录 / target / PATH 查找 |
-| MCP 关闭拉起的 Chrome 空闲时间 | 600（10 分钟） | `BRIDGE_CLOSE_CHROME_IDLE_SECS`（秒）；server 断开或 MCP 会话结束时也会关闭自己拉起的 Chrome |
+| 空闲任务租约回收 | 60 秒 | 仅回收没有在途操作的空闲租约；执行结果未知时继续保留资源 |
 | Chrome 版本 | 120+ | `run_script` 需要 `chrome.userScripts`（135+ 体验最佳） |
+
+## 并发回归验证
+
+升级时先构建 Rust 程序和扩展，再在浏览器扩展管理页重新加载新版本；server 与扩展须同时升级。
+
+```sh
+cargo test --workspace
+pnpm --dir extension test
+pnpm --dir extension exec tsc --noEmit
+pnpm --dir extension build
+cargo build --workspace
+node scripts/test-concurrency.mjs
+```
+
+端到端脚本启动独立的真实 server / MCP 进程，执行实际 background 源码并用内存 Chrome API 验证并发、超时与断线；不访问用户浏览器。Node 测试需要支持 `node:module.stripTypeScriptTypes` 的版本（Node 22.13+ / 23.2+）。
 
 ## 安全说明
 

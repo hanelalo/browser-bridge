@@ -1,12 +1,15 @@
 //! 与 bridge server 的传输层：连接、自动拉起、请求-响应、可重连客户端。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -21,13 +24,15 @@ pub const AUTO_SPAWN_IDLE_TIMEOUT: &str = "120";
 
 pub type BridgeStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// 可重连的 bridge 客户端：长连接 + 请求，断线自动重连（含自动拉起）后重试一次。
+/// Multiplexed transport. Reconnect future calls without replaying sent operations.
 #[derive(Clone)]
 pub struct Bridge {
     server: String,
     client_id: String,
     window_id: Option<i32>,
     task_id: Option<String>,
+    task_guard: Option<Arc<TaskGuard>>,
+    agent_id: Option<String>,
     requests: mpsc::UnboundedSender<RequestCommand>,
 }
 
@@ -37,6 +42,7 @@ struct RequestCommand {
     params: Value,
     timeout: Duration,
     enqueued_at: tokio::time::Instant,
+    deadline_ms: u64,
     reply: oneshot::Sender<Result<Value, String>>,
 }
 
@@ -67,6 +73,8 @@ impl Bridge {
             client_id: client_id.to_string(),
             window_id: None,
             task_id: None,
+            task_guard: None,
+            agent_id: None,
             requests,
         })
     }
@@ -89,24 +97,53 @@ impl Bridge {
     pub fn start_task(&self, window_id: Option<i32>) -> Self {
         static TASK_SEQ: AtomicU64 = AtomicU64::new(0);
         let mut next = self.clone();
-        next.window_id = window_id;
+        next.window_id = window_id.or(self.window_id);
         next.task_id = Some(format!(
             "task-{}-{}",
             std::process::id(),
             TASK_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
+        next.task_guard = Some(Arc::new(TaskGuard {
+            id: next.task_id.clone().unwrap(),
+            requests: self.requests.clone(),
+            finished: AtomicBool::new(false),
+        }));
         next
+    }
+
+    pub fn with_context(
+        &self,
+        window_id: Option<i32>,
+        task_id: Option<String>,
+        agent_id: Option<String>,
+    ) -> Self {
+        let mut next = self.with_window(window_id.or(self.window_id));
+        next.task_id = task_id;
+        next.task_guard = None;
+        next.agent_id = agent_id;
+        next
+    }
+
+    pub fn has_task(&self) -> bool {
+        self.task_id.is_some()
     }
 
     pub async fn finish_task(&self) -> Result<Value, String> {
         let Some(task_id) = self.task_id.as_deref() else {
             return Ok(Value::Null);
         };
-        self.request("task-end", "task_end", json!({ "task_id": task_id }))
-            .await
+        let result = self
+            .request("task-end", "task_end", json!({ "task_id": task_id }))
+            .await;
+        if result.is_ok() {
+            if let Some(guard) = &self.task_guard {
+                guard.finished.store(true, Ordering::Relaxed);
+            }
+        }
+        result
     }
 
-    /// 发送一次请求；连接断开时自动重连（含自动拉起 server）后重试一次。
+    /// Send once; the result may be unknown on disconnect and is never replayed.
     pub async fn request(&self, id: &str, method: &str, params: Value) -> Result<Value, String> {
         self.request_with_timeout(id, method, params, RESPONSE_TIMEOUT)
             .await
@@ -130,12 +167,15 @@ impl Bridge {
         );
         let mut params = params;
         if let (Some(window_id), Some(object)) = (self.window_id, params.as_object_mut()) {
-            object
-                .entry("window_id")
-                .or_insert_with(|| json!(window_id));
+            if object.get("window_id").is_none_or(Value::is_null) {
+                object.insert("window_id".into(), json!(window_id));
+            }
         }
         if let (Some(task_id), Some(object)) = (self.task_id.as_deref(), params.as_object_mut()) {
             object.entry("task_id").or_insert_with(|| json!(task_id));
+        }
+        if let (Some(agent_id), Some(object)) = (self.agent_id.as_deref(), params.as_object_mut()) {
+            object.entry("agent_id").or_insert_with(|| json!(agent_id));
         }
         let (reply, response) = oneshot::channel();
         self.requests
@@ -145,6 +185,8 @@ impl Bridge {
                 params,
                 timeout,
                 enqueued_at: tokio::time::Instant::now(),
+                deadline_ms: unix_ms()
+                    .saturating_add(timeout.as_millis().min(u64::MAX as u128) as u64),
                 reply,
             })
             .map_err(|_| format!("bridge connection manager stopped for {}", self.server))?;
@@ -154,9 +196,50 @@ impl Bridge {
     }
 }
 
-/// Owns the WebSocket and is the only task allowed to read from it. Requests
-/// therefore remain multiplexed even when one MCP session has several tools in
-/// flight at once; each caller waits on its own oneshot response.
+// Owned by all clones of a scoped Bridge. Dropping a cancelled recipe still
+// sends an end request; the server drains an in-flight operation before release.
+struct TaskGuard {
+    id: String,
+    requests: mpsc::UnboundedSender<RequestCommand>,
+    finished: AtomicBool,
+}
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let sender = self.requests.clone();
+        let id = self.id.clone();
+        runtime.spawn(async move {
+            let (reply, response) = oneshot::channel();
+            let command = RequestCommand {
+                id: format!("drop-{id}"),
+                method: "task_end".into(),
+                params: json!({"task_id":id}),
+                timeout: RESPONSE_TIMEOUT,
+                enqueued_at: tokio::time::Instant::now(),
+                deadline_ms: unix_ms() + RESPONSE_TIMEOUT.as_millis() as u64,
+                reply,
+            };
+            if sender.send(command).is_ok() {
+                let _ = response.await;
+            }
+        });
+    }
+}
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+/// One reader distributes responses by ID. Retry timing is an absolute Instant,
+/// so the 100ms expiry ticker cannot cancel/reset the reconnect delay.
 async fn connection_manager(
     server: String,
     client_id: String,
@@ -165,82 +248,93 @@ async fn connection_manager(
 ) {
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut queued: VecDeque<RequestCommand> = VecDeque::new();
-    let mut reconnect_at: Option<tokio::time::Instant> = None;
-    let mut ticker = tokio::time::interval(Duration::from_millis(100));
-    ticker.tick().await;
-
+    let mut connected = true;
+    let mut known_tasks = HashSet::<String>::new();
+    let mut invalid_tasks = HashSet::<String>::new();
+    let mut retry_at = tokio::time::Instant::now();
+    let mut ticker = tokio::time::interval(Duration::from_millis(20));
     loop {
-        if reconnect_at.is_some() {
-            // Keep accepting calls while the server is unavailable. They are
-            // sent after reconnect, or fail at their own deadline.
-            tokio::select! {
-                command = rx.recv() => match command {
-                    Some(command) => queued.push_back(command),
-                    None => return,
-                },
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                    match connect_bridge_no_spawn(&server, &client_id).await {
-                        Ok(new_ws) => {
-                            ws = new_ws;
-                            reconnect_at = None;
-                        }
-                        Err(_) => {}
+        expire_queued(&mut queued);
+        if connected {
+            while let Some(command) = queued.pop_front() {
+                if command.reply.is_closed()
+                    || command.enqueued_at + command.timeout <= tokio::time::Instant::now()
+                {
+                    continue;
+                }
+                if let Some(task_id) = command.params["task_id"].as_str() {
+                    if invalid_tasks.contains(task_id)
+                        && !matches!(
+                            command.method.as_str(),
+                            "task_end" | "task_cancel" | "task_status"
+                        )
+                    {
+                        let _ = command.reply.send(Err(
+                            "task lease was invalidated by reconnect; begin a new task".into(),
+                        ));
+                        continue;
                     }
+                    known_tasks.insert(task_id.to_string());
                 }
-                _ = ticker.tick() => {
-                    expire_queued(&mut queued);
+                if let Err(error) = send_command(&mut ws, &command).await {
+                    let _ = command.reply.send(Err(format!(
+                        "connection lost; execution result unknown: {error}"
+                    )));
+                    fail_pending(&mut pending, "connection lost; execution result unknown");
+                    connected = false;
+                    invalid_tasks.extend(known_tasks.drain());
+                    retry_at = tokio::time::Instant::now() + Duration::from_millis(500);
+                    break;
                 }
+                pending.insert(
+                    command.id,
+                    Pending {
+                        reply: command.reply,
+                        deadline: command.enqueued_at + command.timeout,
+                    },
+                );
             }
-            continue;
         }
-
-        while let Some(command) = queued.pop_front() {
-            if command.reply.is_closed() {
-                continue;
-            }
-            if let Err(err) = send_command(&mut ws, &command).await {
-                let _ = command.reply.send(Err(err));
-                reconnect_at = Some(tokio::time::Instant::now());
-                break;
-            }
-            pending.insert(
-                command.id,
-                Pending {
-                    reply: command.reply,
-                    deadline: tokio::time::Instant::now() + command.timeout,
-                },
-            );
-        }
-        if reconnect_at.is_some() {
-            fail_pending(&mut pending, "bridge connection lost");
-            continue;
-        }
-
         tokio::select! {
-            command = rx.recv() => match command {
-                Some(command) => {
-                    if let Err(err) = send_command(&mut ws, &command).await {
-                        let _ = command.reply.send(Err(err));
-                        fail_pending(&mut pending, "bridge connection lost");
-                        reconnect_at = Some(tokio::time::Instant::now());
-                    } else {
-                        pending.insert(command.id, Pending {
-                            reply: command.reply,
-                            deadline: tokio::time::Instant::now() + command.timeout,
-                        });
+            command = rx.recv() => match command { Some(command)=>queued.push_back(command), None=>return },
+            incoming = ws.next(), if connected => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(response)=serde_json::from_str::<Value>(&text) {
+                        if response["success"]==true {
+                            if let Some(task)=response["result"]["task_id"].as_str() {
+                                if response["result"]["state"]=="finished" {known_tasks.remove(task);}
+                                else {known_tasks.insert(task.to_string());}
+                            }
+                        }
+                    }
+                    handle_response(&mut pending, text.to_string());
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                    fail_pending(&mut pending, "connection lost; execution result unknown");
+                    connected=false; invalid_tasks.extend(known_tasks.drain());
+                    retry_at=tokio::time::Instant::now()+Duration::from_millis(500);
+                }
+                Some(Ok(_)) => {}
+            },
+            _ = ticker.tick() => {
+                // A cancelled tool future must not leave queued browser work
+                // behind. Cancellation is advisory for an already running
+                // operation; the server keeps its resources until completion.
+                if connected {
+                    let cancelled: Vec<_> = pending.iter().filter(|(_, r)|r.reply.is_closed()).map(|(id,_)|id.clone()).collect();
+                    for id in cancelled {
+                        pending.remove(&id);
+                        let _ = ws.send(Message::Text(json!({"id":format!("cancel-{id}"),"method":"request_cancel","params":{"request_id":id}}).to_string().into())).await;
                     }
                 }
-                None => return,
-            },
-            incoming = ws.next() => match incoming {
-                Some(Ok(Message::Text(text))) => handle_response(&mut pending, text.to_string()),
-                Some(Ok(_)) => {}
-                Some(Err(_)) | None => {
-                    fail_pending(&mut pending, "bridge connection lost");
-                    reconnect_at = Some(tokio::time::Instant::now());
+                expire_pending(&mut pending);
+                if !connected && tokio::time::Instant::now() >= retry_at {
+                    if let Ok(Ok(new_ws)) = tokio::time::timeout(Duration::from_secs(2), connect_bridge_no_spawn(&server, &client_id)).await {
+                        ws = new_ws; connected = true;
+                    }
+                    retry_at = tokio::time::Instant::now()+Duration::from_millis(500);
                 }
-            },
-            _ = ticker.tick() => expire_pending(&mut pending),
+            }
         }
     }
 }
@@ -252,6 +346,7 @@ async fn send_command(ws: &mut BridgeStream, command: &RequestCommand) -> Result
             "method": command.method,
             "params": command.params,
             "timeout_ms": command.timeout.as_millis().min(u64::MAX as u128) as u64,
+            "deadline_ms": command.deadline_ms,
         })
         .to_string()
         .into(),
@@ -507,4 +602,206 @@ pub fn urlencode(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+
+    async fn read(ws: &mut BridgeStream) -> Value {
+        loop {
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                return serde_json::from_str(&text).unwrap();
+            }
+        }
+    }
+    async fn accept(listener: &TcpListener) -> BridgeStream {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(MaybeTlsStream::Plain(stream)).await.unwrap();
+        let hello = read(&mut ws).await;
+        assert_eq!(hello["type"], "hello");
+        ws
+    }
+    async fn respond(ws: &mut BridgeStream, request: &Value, result: Value) {
+        ws.send(Message::Text(
+            json!({"id":request["id"],"success":true,"result":result})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_responses_are_matched_even_when_out_of_order() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut ws = accept(&listener).await;
+            let first = read(&mut ws).await;
+            let second = read(&mut ws).await;
+            respond(&mut ws, &second, second["params"].clone()).await;
+            respond(&mut ws, &first, first["params"].clone()).await;
+        });
+        let bridge = Bridge::connect_with_client_id(&format!("ws://{addr}"), "test")
+            .await
+            .unwrap();
+        let (first, second) = tokio::join!(
+            bridge.request("a", "echo", json!({"value":1})),
+            bridge.request("b", "echo", json!({"value":2}))
+        );
+        assert_eq!(first.unwrap()["value"], 1);
+        assert_eq!(second.unwrap()["value"], 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_is_not_starved_by_expiry_ticker_and_does_not_replay_sent_calls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut first = accept(&listener).await;
+            let request = read(&mut first).await;
+            assert_eq!(request["method"], "click");
+            first.close(None).await.unwrap(); // execution outcome unknown
+            let mut second = accept(&listener).await;
+            let request = read(&mut second).await;
+            assert_eq!(request["method"], "ping");
+            respond(&mut second, &request, json!({"pong":true})).await;
+        });
+        let bridge = Bridge::connect_with_client_id(&format!("ws://{addr}"), "test")
+            .await
+            .unwrap();
+        assert!(bridge
+            .request("first", "click", json!({}))
+            .await
+            .unwrap_err()
+            .contains("unknown"));
+        let reply = bridge
+            .request_with_timeout("second", "ping", json!({}), Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(reply["pong"], true);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn requests_expired_during_reconnect_are_never_sent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut first = accept(&listener).await;
+            let _ = read(&mut first).await;
+            first.close(None).await.unwrap();
+            let mut second = accept(&listener).await;
+            let request = read(&mut second).await;
+            assert_eq!(request["method"], "live");
+            respond(&mut second, &request, json!({"ok":true})).await;
+        });
+        let bridge = Bridge::connect_with_client_id(&format!("ws://{addr}"), "test")
+            .await
+            .unwrap();
+        assert!(bridge.request("first", "click", json!({})).await.is_err());
+        assert!(bridge
+            .request_with_timeout(
+                "stale",
+                "must-not-execute",
+                json!({}),
+                Duration::from_millis(80)
+            )
+            .await
+            .is_err());
+        assert!(bridge
+            .request_with_timeout("live", "live", json!({}), Duration::from_secs(2))
+            .await
+            .is_ok());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_recipe_scope_sends_end_without_waiting_for_connection_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut ws = accept(&listener).await;
+            let request = read(&mut ws).await;
+            let task_id = request["params"]["task_id"].clone();
+            respond(&mut ws, &request, json!({})).await;
+            let end = read(&mut ws).await;
+            assert_eq!(end["method"], "task_end");
+            assert_eq!(end["params"]["task_id"], task_id);
+            respond(&mut ws, &end, json!({"ended":true})).await;
+        });
+        let bridge = Bridge::connect_with_client_id(&format!("ws://{addr}"), "test")
+            .await
+            .unwrap();
+        let task = bridge.start_task(Some(7));
+        task.request("work", "click", json!({})).await.unwrap();
+        drop(task);
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn window_context_replaces_null_and_deadline_is_sent_to_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut ws = accept(&listener).await;
+            let request = read(&mut ws).await;
+            assert_eq!(request["params"]["window_id"], 7);
+            assert!(request["deadline_ms"].as_u64().unwrap() > unix_ms());
+            respond(&mut ws, &request, json!({})).await;
+        });
+        let bridge = Bridge::connect_with_client_id(&format!("ws://{addr}"), "test")
+            .await
+            .unwrap()
+            .with_window(Some(7));
+        bridge
+            .request("work", "click", json!({"window_id":null}))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_cannot_silently_recreate_an_old_task_in_a_default_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut first = accept(&listener).await;
+            let begin = read(&mut first).await;
+            respond(
+                &mut first,
+                &begin,
+                json!({"task_id":"issued-task","state":"running"}),
+            )
+            .await;
+            first.close(None).await.unwrap();
+            let mut second = accept(&listener).await;
+            let request = read(&mut second).await;
+            assert_eq!(request["method"], "live");
+            respond(&mut second, &request, json!({})).await;
+        });
+        let bridge = Bridge::connect_with_client_id(&format!("ws://{addr}"), "test")
+            .await
+            .unwrap();
+        bridge
+            .request("begin", "task_begin", json!({}))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let old = bridge.with_context(None, Some("issued-task".into()), None);
+        assert!(old
+            .request("unsafe", "click", json!({}))
+            .await
+            .unwrap_err()
+            .contains("invalidated"));
+        bridge.request("live", "live", json!({})).await.unwrap();
+        server.await.unwrap();
+    }
 }
