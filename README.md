@@ -34,6 +34,8 @@ pnpm dev             # 会自动打开 Chrome 并加载开发版插件
 
 也可以 `pnpm build` 后，在 `chrome://extensions` 打开"开发者模式"，加载 `extension/dist/chrome-mv3` 目录。
 
+点击扩展弹窗里的「任务面板」，或从 Chrome 侧边栏打开 Browser Bridge，可以看到**当前窗口**里正在执行和排队的任务。排队数据在 bridge-server 上，server 与扩展需要一起升级。
+
 ### 3. 使用 client
 
 client 连接失败时会**自动拉起 bridge-server**（需要已构建的二进制，可用 `BRIDGE_SERVER_BIN` 指定路径），自动拉起的 server 空闲 120 秒自动退出；插件断线后按 500ms→5s 退避自动重连。

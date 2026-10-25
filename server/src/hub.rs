@@ -544,6 +544,10 @@ impl Hub {
             }
             return;
         }
+        if msg.method.as_deref() == Some("_window_tasks") {
+            self.reply_window_tasks(&msg);
+            return;
+        }
         if msg.method.as_deref() == Some("_window_removed") {
             if let Some(window) = msg.params.as_ref().and_then(|p| p["window_id"].as_i64()) {
                 let ids: Vec<_> = self
@@ -849,6 +853,72 @@ impl Hub {
         }
         self.schedule();
     }
+    /// Read-only snapshot for the extension side panel. Does not admit work.
+    fn reply_window_tasks(&self, msg: &WireMessage) {
+        let Some(ext) = self.extension else {
+            return;
+        };
+        let Some(id) = msg.id.as_deref().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        match msg
+            .params
+            .as_ref()
+            .and_then(|params| params["window_id"].as_i64())
+        {
+            Some(window_id) if window_id >= 0 => {
+                self.send(ext, WireMessage::ok(id, self.window_tasks(window_id)));
+            }
+            _ => self.send(
+                ext,
+                WireMessage::err(id, "window_id must be a non-negative integer"),
+            ),
+        }
+    }
+    fn window_tasks(&self, window_id: i64) -> Value {
+        let mut keys: Vec<String> = self.order.iter().cloned().collect();
+        for key in self.tasks.keys() {
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.clone());
+            }
+        }
+        let mut running = Vec::new();
+        let mut pending = Vec::new();
+        for key in keys {
+            let Some(task) = self.tasks.get(&key) else {
+                continue;
+            };
+            if !task.windows.contains(&window_id) {
+                continue;
+            }
+            let view = self.task_view(&key, task);
+            if task.started {
+                running.push(view);
+            } else {
+                pending.push(view);
+            }
+        }
+        json!({ "window_id": window_id, "running": running, "pending": pending })
+    }
+    fn task_view(&self, key: &str, task: &Task) -> Value {
+        let inflight = task
+            .inflight
+            .as_deref()
+            .and_then(|id| self.executing.get(id))
+            .map(|(_, request)| step_view(request));
+        let queued: Vec<_> = task.queue.iter().map(step_view).collect();
+        json!({
+            "key": key,
+            "task_id": task.public_id,
+            "agent_id": task.agent_id,
+            "client_id": self.conns.get(&task.conn).map(|conn| conn.client_id.clone()),
+            "state": if task.closing { "closing" } else if task.started { "running" } else { "queued" },
+            "window_ids": task.windows,
+            "tab_id": task.tab,
+            "inflight": inflight,
+            "queued": queued,
+        })
+    }
     fn schedule(&mut self) {
         let Some(ext) = self.extension else {
             return;
@@ -903,6 +973,48 @@ impl Hub {
             self.executing.insert(request.wire.clone(), (key, request));
             self.send(ext, outgoing);
         }
+    }
+}
+
+fn step_view(request: &Request) -> Value {
+    json!({
+        "id": request.original,
+        "method": request.msg.method.clone().unwrap_or_default(),
+        "detail": step_detail(request),
+    })
+}
+
+fn step_detail(request: &Request) -> Option<String> {
+    let params = request.msg.params.as_ref()?;
+    let method = request.msg.method.as_deref().unwrap_or("");
+    let raw = match method {
+        "navigate" | "new_tab" => params["url"].as_str(),
+        "press_key" => params["key"].as_str(),
+        "scrape" => params["item"].as_str(),
+        "run_script" | "screenshot" | "get_page_content" | "get_page_markdown"
+        | "get_a11y_tree" | "task_begin" | "close_tab" | "close_auto_tabs" | "close_window"
+        | "close_agent_window" => None,
+        _ => params
+            .get("target")
+            .and_then(|target| target.get("value"))
+            .and_then(Value::as_str)
+            .or_else(|| params.get("url").and_then(Value::as_str)),
+    }?;
+    let text = raw.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(truncate_chars(text, 96))
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let truncated: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 

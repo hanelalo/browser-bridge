@@ -114,3 +114,20 @@ test('background rejects overlapping operations even if a server sends invalid p
   assert.match(replies.find((r) => r.id === 'second').error, /still has/);
   finish(); await first;
 });
+
+test('window task query returns the scheduler snapshot for one window', async () => {
+  const bg = await background();
+  await assert.rejects(bg.requestWindowTasks(5), /未连接/);
+  const snapshot = { window_id: 5, running: [{ state: 'running' }], pending: [{ state: 'queued' }] };
+  const socket = {
+    readyState: 1,
+    send(raw) {
+      const msg = JSON.parse(raw);
+      assert.equal(msg.method, '_window_tasks');
+      assert.equal(msg.params.window_id, 5);
+      void bg.handleMessage(socket, JSON.stringify({ id: msg.id, success: true, result: snapshot }));
+    },
+  };
+  bg.setSocket(socket);
+  assert.equal(JSON.stringify(await bg.requestWindowTasks(5)), JSON.stringify(snapshot));
+});

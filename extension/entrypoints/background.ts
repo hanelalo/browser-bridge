@@ -34,6 +34,57 @@ type ExecutionRecord = {
 const executions = new Map<string, ExecutionRecord>();
 let journalWrites: Promise<void> = Promise.resolve();
 
+type WindowTaskSnapshot = {
+  window_id: number;
+  running: unknown[];
+  pending: unknown[];
+};
+const snapshotWaiters = new Map<string, {
+  resolve: (value: WindowTaskSnapshot) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+function failSnapshotWaiters(message: string): void {
+  for (const waiter of snapshotWaiters.values()) {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error(message));
+  }
+  snapshotWaiters.clear();
+}
+
+function requestWindowTasks(windowId: number): Promise<WindowTaskSnapshot> {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error('未连接 bridge server'));
+  }
+  const id = `window-tasks-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      snapshotWaiters.delete(id);
+      reject(new Error('查询任务超时，请确认 bridge-server 已升级'));
+    }, 4_000);
+    snapshotWaiters.set(id, { resolve, reject, timer });
+    send(socket, { id, method: '_window_tasks', params: { window_id: windowId } });
+  });
+}
+
+function settleSnapshot(msg: {
+  id?: unknown;
+  success?: unknown;
+  result?: unknown;
+  error?: unknown;
+}): boolean {
+  if (typeof msg.id !== 'string') return false;
+  const waiter = snapshotWaiters.get(msg.id);
+  if (!waiter) return false;
+  snapshotWaiters.delete(msg.id);
+  clearTimeout(waiter.timer);
+  if (msg.success === true) waiter.resolve((msg.result ?? {}) as WindowTaskSnapshot);
+  else waiter.reject(new Error(typeof msg.error === 'string' ? msg.error : '查询任务失败'));
+  return true;
+}
+
 function saveExecutionJournal(): Promise<void> {
   // Only unfinished execution metadata survives worker restarts. Results can
   // contain screenshots or full pages and must never enter session storage.
@@ -176,6 +227,7 @@ function connect(): void {
   socket.onclose = () => {
     if (ws === socket) ws = null;
     stopPing();
+    failSnapshotWaiters('未连接 bridge server');
     setStatus('disconnected');
     scheduleReconnect();
     void ensureOffscreen();
@@ -248,13 +300,18 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
     method?: unknown;
     params?: Record<string, unknown>;
     client_id?: unknown;
+    success?: unknown;
+    result?: unknown;
+    error?: unknown;
   };
   try {
     msg = JSON.parse(raw);
   } catch {
     return;
   }
-  if (!msg || typeof msg !== 'object' || typeof msg.id !== 'string') return;
+  if (!msg || typeof msg !== 'object') return;
+  if (settleSnapshot(msg)) return;
+  if (typeof msg.id !== 'string') return;
   // 没有 method 的是服务端响应（如 pong），忽略
   if (typeof msg.method !== 'string') return;
 
@@ -1850,6 +1907,21 @@ chrome.runtime.onMessage.addListener(
         .then((tabs) => sendResponse({ count: tabs.length }))
         .catch(() => sendResponse({ count: null }));
       return true; // 异步响应
+    } else if (m?.type === 'window_tasks') {
+      const windowId = (msg as { window_id?: unknown }).window_id;
+      if (typeof windowId !== 'number' || !Number.isInteger(windowId) || windowId < 0) {
+        sendResponse({ ok: false, status, url: SERVER_URL, error: 'window_id 无效' });
+        return;
+      }
+      requestWindowTasks(windowId)
+        .then((snapshot) => sendResponse({ ok: true, status, url: SERVER_URL, snapshot }))
+        .catch((err: unknown) => sendResponse({
+          ok: false,
+          status,
+          url: SERVER_URL,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+      return true;
     }
   },
 );

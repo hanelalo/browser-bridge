@@ -8,9 +8,22 @@ const url = ref('ws://127.0.0.1:9225');
 const tabCount = ref<number | null>(null);
 let timer: ReturnType<typeof setInterval> | null = null;
 
+const panelError = ref('');
+
 const statusText = computed(() =>
   status.value === 'connected' ? '已连接' : status.value === 'connecting' ? '连接中' : '未连接',
 );
+
+async function openPanel(): Promise<void> {
+  panelError.value = '';
+  try {
+    const current = await chrome.windows.getCurrent();
+    if (current.id == null) throw new Error('无法确定当前窗口');
+    await chrome.sidePanel.open({ windowId: current.id });
+  } catch (err) {
+    panelError.value = err instanceof Error ? err.message : String(err);
+  }
+}
 
 async function refresh(): Promise<void> {
   try {
@@ -71,6 +84,8 @@ onUnmounted(() => {
       <button @click="reconnect">重新连接</button>
       <button @click="countTabs">{{ tabCount === null ? '统计标签页' : `标签页：${tabCount}` }}</button>
     </div>
+    <button class="panel" @click="openPanel">任务面板</button>
+    <p v-if="panelError" class="panel-error">{{ panelError }}</p>
   </div>
 </template>
 
@@ -121,5 +136,14 @@ button {
 }
 button:hover {
   background: #f3f4f6;
+}
+button.panel {
+  width: 100%;
+  margin-top: 8px;
+}
+.panel-error {
+  margin: 8px 0 0;
+  color: #dc2626;
+  font-size: 12px;
 }
 </style>

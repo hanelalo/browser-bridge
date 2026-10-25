@@ -81,6 +81,20 @@ impl Fixture {
             msg: WireMessage::ok(msg.id.as_deref().unwrap(), result),
         });
     }
+    fn window_tasks(&mut self, window: i64) -> Value {
+        self.hub.event(HubMsg::Forward {
+            conn_id: 1,
+            msg: WireMessage {
+                id: Some(format!("snap-{window}")),
+                method: Some("_window_tasks".into()),
+                params: Some(json!({ "window_id": window })),
+                ..WireMessage::default()
+            },
+        });
+        let snap = recv(&mut self.browser);
+        assert_eq!(snap.success, Some(true));
+        snap.result.expect("snapshot")
+    }
     fn expire_execution(&mut self, command: &WireMessage) {
         self.hub
             .executing
@@ -463,4 +477,53 @@ fn default_window_creation_also_waits_for_global_capacity() {
     assert_eq!(actual.method.as_deref(), Some("click"));
     assert_ne!(actual.id, setup.id);
     assert_eq!(f.hub.executing.len(), 3);
+}
+
+#[test]
+fn window_task_snapshot_splits_running_and_pending_for_one_window() {
+    let mut f = Fixture::new();
+    f.submit(2, "run", 7, Some("lease"));
+    let _running = recv(&mut f.browser);
+    f.submit(2, "next", 7, Some("lease"));
+    assert!(
+        f.browser.try_recv().is_err(),
+        "follow-up stays behind the inflight command"
+    );
+    f.submit(3, "wait", 7, None);
+    assert!(
+        f.browser.try_recv().is_err(),
+        "a second task waits for the busy window"
+    );
+    f.submit(2, "other", 8, None);
+    let _other = recv(&mut f.browser);
+
+    let here = f.window_tasks(7);
+    assert_eq!(here["window_id"], 7);
+    assert_eq!(here["running"].as_array().unwrap().len(), 1);
+    assert_eq!(here["pending"].as_array().unwrap().len(), 1);
+    let running = &here["running"][0];
+    assert_eq!(running["state"].as_str(), Some("running"));
+    assert_eq!(running["task_id"].as_str(), Some("lease"));
+    assert_eq!(running["client_id"].as_str(), Some("mcp-a"));
+    assert_eq!(running["inflight"]["id"].as_str(), Some("run"));
+    assert_eq!(running["inflight"]["method"].as_str(), Some("run_script"));
+    assert!(running["inflight"]["detail"].is_null());
+    assert_eq!(running["queued"][0]["id"].as_str(), Some("next"));
+    let pending = &here["pending"][0];
+    assert_eq!(pending["state"].as_str(), Some("queued"));
+    assert!(pending["task_id"].is_null());
+    assert_eq!(pending["client_id"].as_str(), Some("mcp-b"));
+    assert!(pending["inflight"].is_null());
+    assert_eq!(pending["queued"][0]["id"].as_str(), Some("wait"));
+
+    let elsewhere = f.window_tasks(8);
+    assert_eq!(elsewhere["running"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        elsewhere["running"][0]["inflight"]["id"].as_str(),
+        Some("other")
+    );
+    assert!(elsewhere["pending"].as_array().unwrap().is_empty());
+    let empty = f.window_tasks(99);
+    assert!(empty["running"].as_array().unwrap().is_empty());
+    assert!(empty["pending"].as_array().unwrap().is_empty());
 }

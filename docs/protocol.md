@@ -34,7 +34,15 @@ server 对所有 client 统一调度：最多同时执行 3 个任务；同一�
 
 任务管理方法：`task_begin` 申请窗口租约并返回 `task_id`、`window_id`、`tab_id`；`task_status` 查询状态；`task_end` 结束；`task_cancel` 取消。后三者接收 `{ "task_id": "..." }`。租约绑定发起连接，`agent_id` 可选，用于标记同一 MCP 会话下的逻辑 agent。已获得额度但没有在途操作的租约空闲 60 秒后回收。
 
-server 内部使用 `_resolve_target` 固定执行目标、`_sync_executions` 核对执行记录。客户端不能调用这些内部方法。扩展仅持久化未完成操作的请求 ID、窗口和运行状态，操作完成后删除记录，不缓存结果。断线导致结果丢失时，由调用方重新发起请求；重连同步仅用于核对窗口占用和释放额度。server 重启后也会接管扩展报告的未完成操作，保留对应额度。若 service worker 重启且不能确认页面脚本是否结束，会继续保留资源；手动关闭涉及的窗口后可确认释放。
+server 内部使用 `_resolve_target` 固定执行目标、`_sync_executions` 核对执行记录、`_window_tasks` 查询某个窗口的调度快照。客户端不能调用这些内部方法。
+
+`_window_tasks` 只读，不参与准入。扩展侧边栏用它显示当前窗口里正在执行和排队的任务：
+
+```json
+{ "id": "snap-1", "method": "_window_tasks", "params": { "window_id": 5 } }
+```
+
+result：`{ window_id, running[], pending[] }`。`running` 是已经占用该窗口的任务（含收尾中），`pending` 是已经解析到该窗口、还在等额度或等窗口空闲的任务。每项含 `task_id` / `agent_id` / `client_id` / `state`（`running` / `closing` / `queued`）/ `window_ids` / `tab_id` / `inflight` / `queued`。`inflight` 是当前这条浏览器指令，`queued` 是同一任务里还没开始的指令；单条指令没有 `task_id` 时 `task_id` 为 `null`。扩展仅持久化未完成操作的请求 ID、窗口和运行状态，操作完成后删除记录，不缓存结果。断线导致结果丢失时，由调用方重新发起请求；重连同步仅用于核对窗口占用和释放额度。server 重启后也会接管扩展报告的未完成操作，保留对应额度。若 service worker 重启且不能确认页面脚本是否结束，会继续保留资源；手动关闭涉及的窗口后可确认释放。
 
 客户端传输重连后，旧连接签发或使用过的任务不能继续执行新指令，必须重新申请任务；不会把旧 `task_id` 静默绑定到默认窗口。新任务仍需等待旧操作实际结束后才能获得资源。默认专用窗口的首次创建也经过全局额度调度。
 

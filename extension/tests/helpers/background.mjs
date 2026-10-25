@@ -51,7 +51,7 @@ export async function background(saved = {}, { quotaBytes = Infinity } = {}) {
     .replace('export default defineBackground', 'defineBackground');
   const context = vm.createContext({ chrome, crypto: webcrypto, console, setTimeout, clearTimeout, setInterval, clearInterval,
     WebSocket: { OPEN: 1 }, defineBackground: () => {} });
-  vm.runInContext(stripTypeScriptTypes(source) + '\n globalThis.api = { init: () => (stateReady = restoreState()), resolveTab, resolveTarget, validateExecutionScope, handleMessage, syncExecutions, ensureAgentWindow, setSocket: (socket) => { ws = socket; } };', context);
+  vm.runInContext(stripTypeScriptTypes(source) + '\n globalThis.api = { init: () => (stateReady = restoreState()), resolveTab, resolveTarget, validateExecutionScope, handleMessage, syncExecutions, ensureAgentWindow, requestWindowTasks, setSocket: (socket) => { ws = socket; } };', context);
   await context.api.init();
   return { ...context.api, chrome, data, storageWrites, tabs, windows, events, creations: () => creations };
 }
