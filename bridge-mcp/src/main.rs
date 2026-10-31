@@ -1429,7 +1429,7 @@ impl BridgeMcp {
 
     #[tool(
         name = "googletrends",
-        description = "Google Trends 趋势查询，返回 { tab_id, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available }。available 表示表格已成功读取，即使 rows 为空也可能为 true；regions 为按地区的搜索热度（rank/region/geo_code/interest）"
+        description = "Google Trends 趋势查询（新版探索页，懒挂载 + 纯前端分页），返回 { tab_id, query, date, geo, trend[], top[], rising[], regions[], top_table_available, rising_table_available, tables_available, regions_available, hydration }。available 表示表格已成功读取，即使 rows 为空也可能为 true；hydration 带各阶段页面年龄、分页次数与 complete 完整性标记；regions 为按地区的搜索热度（rank/region/geo_code/interest）"
     )]
     pub async fn googletrends_tool(
         &self,
@@ -1519,7 +1519,7 @@ impl BridgeMcp {
 
     #[tool(
         name = "googletrends_compare",
-        description = "Google Trends 关键词对比，返回 { series[] }，每个词一条趋势序列（共享 0-100 刻度，不返回热门/上升表）"
+        description = "Google Trends 关键词对比，只读首屏多折线、不滚动页面，返回 { series[] }，每个词一条趋势序列（共享 0-100 刻度，不返回热门/上升表），另带 hydration 耗时诊断"
     )]
     pub async fn googletrends_compare_tool(
         &self,

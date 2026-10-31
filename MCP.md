@@ -231,6 +231,8 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 
 单关键词 Google Trends 查询，自动翻页拿完整趋势序列 + 热门/上升查询 + 区域热度。**每次查询会新建一个标签页**，流程收尾时请调用 `close_auto_tabs` 清理。
 
+采集策略：趋势线/区域随页面加载取数；热门/上升查询卡片要进入视口才挂载，**挂载时才发数据请求**（先空骨架，拿到响应才填充，总数也会从占位值变成真实值）。配方打开页面后立即滚到查询卡片（尽早触发请求）并关掉滚动容器的平滑动画，按状态等待内容（区域榜先就绪先采，与查询数据的等待重叠），再用页面自带的 `第 X – Y 行（共 N 行）` 翻完纯前端分页。典型耗时 10–14s，图表始终不出现时会换新标签页重试一次。
+
 参数：
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
@@ -239,10 +241,10 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `date` | string | — | `today 1-m` | 时间范围：`today 1-m` / `today 3-m` / `today 12-m` / `today 5-y` / `all` |
 | `geo` | string | — | `Worldwide` | 地区代码（如 `US`、`CN`），不区分大小写 |
 
-返回：`{ "tab_id": int, "trend": [...], "top": [...], "rising": [...], "regions": [...], "top_table_available": bool, "rising_table_available": bool, "tables_available": bool }`。`*_table_available` 表示页面对应表格已成功读取，表格存在但没有行时仍为 `true`；这与页面未显示/无法读取表格的状态不同。
+返回：`{ "tab_id": int, "query": str, "date": str, "geo": str, "trend": [...], "top": [...], "rising": [...], "regions": [...], "top_table_available": bool, "rising_table_available": bool, "tables_available": bool, "regions_available": bool, "hydration": {...} }`。`*_table_available` 表示页面对应表格已成功读取，表格存在但没有行时仍为 `true`；这与页面未显示/无法读取表格的状态不同。`hydration` 带各阶段页面年龄、分页次数与 `complete` 完整性标记，便于排查慢请求。
 
-- `top` / `rising`：热门/上升查询，每条 `{ rank, query, interest, change }`，自动翻完所有分页（一般各 50 条）
-- `regions`：按地区显示的搜索热度，每条 `{ rank, region, geo_code, interest }`（`geo_code` 为 ISO 地区码），同样自动翻完分页（实测可达 66 条）
+- `top` / `rising`：热门/上升查询，每条 `{ rank, query, interest, change }`，自动翻完所有分页（一般各 25–50 条）
+- `regions`：按地区显示的搜索热度，每条 `{ rank, region, geo_code, interest }`（`geo_code` 为 ISO 地区码），同样自动翻完分页（实测可达 56 条）
 
 #### oldgoogletrends
 
@@ -267,7 +269,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 
 #### googletrends_compare
 
-多关键词走势对比，共享 0-100 刻度。同样会新建标签页，收尾时用 `close_auto_tabs` 清理。
+多关键词走势对比，共享 0-100 刻度。只读首屏多折线图，不滚动页面（旧版会等 2–3s 再匀速滚 5s）；按状态等 N 条折线出现，典型 6–13s。同样会新建标签页，收尾时用 `close_auto_tabs` 清理。
 
 参数：
 
@@ -277,7 +279,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `date` | string | — | `today 1-m` | 同 `googletrends` |
 | `geo` | string | — | `Worldwide` | 同 `googletrends` |
 
-返回：`{ "tab_id": int, "series": [...] }`。
+返回：`{ "tab_id": int, "terms": [...], "date": str, "geo": str, "series": [{ "term": str, "trend": [{ "date": str, "value": int }] }], "hydration": {...} }`；`hydration` 含折线出现时间、点数和耗时。
 
 #### oldgoogletrends_compare
 

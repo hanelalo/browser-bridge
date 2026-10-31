@@ -1,5 +1,9 @@
-//! Google Trends 搜索配方：站点知识（选择器 + SVG 反解）集中在这里，
-//! 通过通用原语 navigate + run_script 编排。
+//! Google Trends（新版探索页）：站点知识集中在 `googletrends.js`。
+//!
+//! 新版页面是"数据预取 + 卡片懒挂载"：查询卡片不进入视口时连 <table> 都不存在，
+//! 滚动容器还带 scroll-behavior:smooth。脚本先滚到卡片、关掉动画，再按状态等待
+//! 骨架填充，最后用页面自带的分页文案翻完榜单（纯前端）。
+//! 编排侧只做两件事：等页面壳就绪，然后跑一次采集脚本（脚本内部 45s deadline）。
 
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -8,19 +12,23 @@ use crate::transport::{urlencode, Bridge};
 
 const DEFAULT_DATE: &str = "today 1-m";
 const DEFAULT_GEO: &str = "Worldwide";
+const SCRIPT: &str = include_str!("googletrends.js");
+const COMPARE_SCRIPT: &str = include_str!("googletrends_compare.js");
+/// 页面内的采集脚本自带 45s 状态 deadline，外层给足余量
 const GOOGLE_TRENDS_SCRIPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// 页面壳就绪的轮询次数（500ms/次，共 45s）
+const READY_POLLS: usize = 90;
 
 fn query_tables_available(top_table_found: bool, rising_table_found: bool) -> bool {
     top_table_found || rising_table_found
 }
 
-fn should_retry_query_tables(tables_available: bool) -> bool {
-    !tables_available
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{query_tables_available, should_retry_query_tables, GOOGLE_TRENDS_SCRIPT_TIMEOUT};
+    use super::{
+        compare_script, normalize_date, query_tables_available, trends_script,
+        GOOGLE_TRENDS_SCRIPT_TIMEOUT,
+    };
 
     #[test]
     fn query_tables_are_available_even_when_empty() {
@@ -38,9 +46,41 @@ mod tests {
     }
 
     #[test]
-    fn missing_query_tables_are_retryable() {
-        assert!(should_retry_query_tables(false));
-        assert!(!should_retry_query_tables(true));
+    fn trends_script_injects_date_spec() {
+        let script = trends_script("today 3-m");
+        assert!(script.contains(r#"const DATE_SPEC = "today 3-m";"#));
+        assert!(!script.contains("__DATE_SPEC__"));
+    }
+
+    #[test]
+    fn compare_script_injects_terms_and_date() {
+        let script = compare_script(&["coffee".to_string(), "tea".to_string()], "today 3-m");
+        assert!(script.contains(r#"const TERMS = ["coffee","tea"];"#));
+        assert!(script.contains(r#"const DATE_SPEC = "today 3-m";"#));
+        assert!(!script.contains("__TERMS__"));
+        assert!(!script.contains("__DATE_SPEC__"));
+    }
+
+    #[test]
+    fn normalize_date_keeps_supported_formats() {
+        for date in [
+            "today 1-m",
+            "today 12-m",
+            "today 1-y",
+            "all",
+            "2025-01-01 2025-06-30",
+        ] {
+            assert_eq!(normalize_date(date), date);
+        }
+    }
+
+    #[test]
+    fn normalize_date_trims_and_falls_back() {
+        assert_eq!(normalize_date("  today 3-m  "), "today 3-m");
+        assert_eq!(normalize_date(""), "today 1-m");
+        assert_eq!(normalize_date("yesterday"), "today 1-m");
+        assert_eq!(normalize_date("today x-m"), "today 1-m");
+        assert_eq!(normalize_date("2025-01-01"), "today 1-m");
     }
 }
 
@@ -65,7 +105,6 @@ fn regex_dmy(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("today ") else {
         return false;
     };
-    // rest 形如 "N-d" / "N-m" / "N-y"
     let Some(idx) = rest.find('-') else {
         return false;
     };
@@ -98,493 +137,56 @@ fn is_date(s: &str) -> bool {
     }
 }
 
-/// 页面内执行脚本：等图表和表格加载完，反解趋势曲线并读两张关键词表。
-/// 日期由脚本端按 date 参数 + 点数推导（不依赖页面本地化文案）。
+/// 把日期写进采集脚本（脚本用它推导趋势点的日期）。
 fn trends_script(date_spec: &str) -> String {
     let date_lit = serde_json::to_string(date_spec).unwrap_or_else(|_| "\"today 1-m\"".into());
-    format!(
-        r#"(async () => {{
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const deadline = Date.now() + 20000;
-  // Trends 是固定高度的应用壳，滚动要同时覆盖 window 和内部滚动容器，懒加载才触发
-  const scrollAll = () => {{
-    window.scrollTo(0, document.body.scrollHeight);
-    Array.from(document.querySelectorAll('div')).forEach((el) => {{
-      if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
-    }});
-  }};
-  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 5 秒走完：
-  // 进度按真实耗时计算，慢速经过每个区块，可见性机制（懒加载等）才来得及触发。
-  // 用 setTimeout 步进而非 requestAnimationFrame——后台标签页 rAF 不触发会卡死；
-  // 高度随懒加载增长时每帧重算最大值，保证 5 秒整仍能落到真实底部
-  const smoothScroll = async () => {{
-    await sleep(2000 + Math.random() * 1000);
-    const DURATION = 5000;
-    const start = Date.now();
-    for (;;) {{
-      const p = Math.min(1, (Date.now() - start) / DURATION);
-      window.scrollTo(0, Math.max(0, (document.body.scrollHeight - window.innerHeight) * p));
-      Array.from(document.querySelectorAll('div')).forEach((el) => {{
-        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = (el.scrollHeight - el.clientHeight) * p;
-      }});
-      if (p >= 1) break;
-      await sleep(50);
-    }}
-  }};
-  await smoothScroll();
-  let svg = null;
-  let line = null;
-  let lineAt = 0;
-  // 曲线判定不依赖 mask 和 d 长度：新渲染变体（稀疏数据等场景）每条线是普通 path，
-  // 无 mask 属性且 d 仅 ~840，图标路径则横跨不达标——用「单段 M 起笔 + 点数足够 +
-  // 横跨绘图区七成以上（右侧标签区宽度随变体不同）」识别
-  const isLinePath = (p, vbW) => {{
-    const d = p.getAttribute('d') || '';
-    const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
-    return (d.match(/M/g) || []).length === 1 && nums.length >= 100
-      && nums[0] <= 2 && nums[nums.length - 2] >= vbW * 0.7;
-  }};
-  while (Date.now() < deadline) {{
-    line = null;
-    for (const s of document.querySelectorAll('svg')) {{
-      if (s.getBoundingClientRect().width <= 100) continue;
-      const vbW = (s.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number)[2] || 1280;
-      const hit = Array.from(s.querySelectorAll('path')).filter((p) => isLinePath(p, vbW))[0] || null;
-      if (hit) {{ svg = s; line = hit; break; }}
-    }}
-    // 等表格行不是骨架：至少 20 个已填充内容的查询单元格。
-    // 曲线已出但表格 6 秒仍无行（无数据词只有贴底平线、没有表）：不再空转到 deadline
-    const filledRows = Array.from(document.querySelectorAll('table tbody tr td:nth-child(2)'))
-      .filter((td) => (td.textContent || '').trim().length > 0).length;
-    if (line && !lineAt) lineAt = Date.now();
-    if (line && (filledRows >= 20 || Date.now() - lineAt > 6000)) break;
-    scrollAll();
-    await sleep(300);
-  }}
-  if (!line) return {{ error: 'trend chart not loaded' }};
-
-  // --- 趋势曲线：解析 path 坐标，再按 y 轴刻度校准成 0-100 ---
-  const d = line.getAttribute('d');
-  const cmds = d.match(/[MC]/g) || [];
-  const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
-  let ni = 0;
-  const ys = [];
-  for (const c of cmds) {{
-    if (c === 'M') {{ ys.push(nums[ni + 1]); ni += 2; }}
-    else {{ ys.push(nums[ni + 5]); ni += 6; }}
-  }}
-  const vb = (svg.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number);
-  const svgTop = svg.getBoundingClientRect().y;
-  const labelY = {{}};
-  Array.from(document.querySelectorAll('svg text')).forEach((t) => {{
-    const v = t.textContent.trim();
-    if (v === '0' && labelY['0'] == null) labelY['0'] = t.getBoundingClientRect().y - svgTop;
-    if (v === '100' && labelY['100'] == null) labelY['100'] = t.getBoundingClientRect().y - svgTop;
-  }});
-  const y0 = labelY['0'] != null ? labelY['0'] : (vb[3] || 320);
-  const y100 = labelY['100'] != null ? labelY['100'] : 0;
-  const span = (y0 - y100) || 1;
-  const values = ys.map((y) => Math.max(0, Math.min(100, Math.round(((y0 - y) / span) * 100))));
-
-  // --- 日期：按 date 参数 + 点数推导粒度（日/周/月） ---
-  const DATE_SPEC = {date_lit};
-  const fmt = (dd) => dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0') + '-' + String(dd.getDate()).padStart(2, '0');
-  const buildDates = (spec, n) => {{
-    const now = new Date();
-    let end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    let start = null;
-    const s = String(spec).trim();
-    const m = s.match(/^today\s+(\d+)-([dmy])$/);
-    if (m) {{
-      const k = parseInt(m[1], 10);
-      start = new Date(end);
-      if (m[2] === 'd') start.setDate(end.getDate() - k);
-      else if (m[2] === 'm') start.setMonth(end.getMonth() - k);
-      else start.setFullYear(end.getFullYear() - k);
-    }} else if (s === 'all') {{
-      start = new Date(2004, 0, 1);
-    }} else {{
-      const dm = s.match(/^(\d{{4}}-\d{{2}}-\d{{2}})\s+(\d{{4}}-\d{{2}}-\d{{2}})$/);
-      if (dm) {{ start = new Date(dm[1]); end = new Date(dm[2]); }}
-    }}
-    // 无法识别的日期格式：回落为今天往前一个月，保证日期永不缺失
-    if (!start) {{ start = new Date(end); start.setMonth(end.getMonth() - 1); }}
-    if (n <= 0) return [];
-    const days = Math.round((end - start) / 86400000);
-    const back = (offset) => new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset);
-    // Google 的采样点以今天为终点往前排，日期从终点倒推而不是从起点正推
-    if (Math.abs(n - days) <= 2) return Array.from({{ length: n }}, (_, i) => fmt(back(n - 1 - i)));
-    const weekly = Math.round(days / 7);
-    if (Math.abs(n - weekly) <= 2) return Array.from({{ length: n }}, (_, i) => fmt(back((n - 1 - i) * 7)));
-    return Array.from({{ length: n }}, (_, i) => fmt(back(Math.round(((n - 1 - i) * days) / (n - 1 || 1)))));
-  }};
-  const dates = buildDates(DATE_SPEC, values.length);
-  const trend = values.map((v, i) => ({{ date: dates[i] || null, value: v }}));
-
-  // --- 关键词表：按卡片标题分类（热门/上升/区域），各表自动翻页直到按钮禁用 ---
-  // --- 表格分类：表头定大类，widget 卡片标题细分 top/rising/region，全走元素结构定位 ---
-  const headerOf = (t) => Array.from(t.querySelectorAll('thead th')).map((th) => th.textContent.trim()).join(' ');
-  const isRegionHeader = (t) => /指数和区域|region/i.test(headerOf(t));
-  const isQueryHeader = (t) => !isRegionHeader(t) && /查询|query|term/i.test(headerOf(t));
-  // widget 卡片标题：从表格向上爬，遇到含多张表的容器即视为已爬出卡片
-  const cardTitleOf = (table) => {{
-    let el = table;
-    for (let i = 0; i < 12 && el; i++) {{
-      el = el.parentElement;
-      if (!el) break;
-      if (el.querySelectorAll('table').length > 1) break;
-      const h = Array.from(el.querySelectorAll('h1,h2,h3,h4,[role="heading"]')).map((x) => x.textContent.trim()).find(Boolean);
-      if (h) return h;
-    }}
-    return '';
-  }};
-  const kindOf = (t) => {{
-    if (isRegionHeader(t)) return 'region';
-    if (!isQueryHeader(t)) return null;
-    const title = cardTitleOf(t);
-    if (/上升|rising/i.test(title)) return 'rising';
-    if (/热门|top|most/i.test(title)) return 'top';
-    return 'unknown';
-  }};
-  // 热度值：新版页面把数字放在 data-search-interest / aria-label 里，旧版在 title 上
-  const interestOf = (el) => {{
-    if (!el) return null;
-    const dsi = el.getAttribute('data-search-interest');
-    if (dsi != null && /^\d+$/.test(dsi.trim())) return parseInt(dsi, 10);
-    const m = (el.getAttribute('aria-label') || '').match(/(\d+)\s*$/);
-    return m ? parseInt(m[1], 10) : null;
-  }};
-  const parseQueryRow = (tr, i) => {{
-    const cells = Array.from(tr.querySelectorAll('td'));
-    if (cells.length < 4) return null;
-    const query = (cells[1].querySelector('.Z9Uqw') || cells[1]).textContent.trim();
-    if (!query) return null;
-    const rankText = (cells[0].textContent || '').trim();
-    const rank = /^\d+$/.test(rankText) ? parseInt(rankText, 10) : i + 1;
-    const interest = interestOf(cells[2].querySelector('[role="img"]'));
-    const chgCell = cells[3];
-    const chgTxt = chgCell ? ((chgCell.querySelector('.VYi2zf') || chgCell).textContent || '').trim() : '';
-    const pm = chgTxt.match(/([+-−])\s*([\d,.]+)\s*%/);
-    let change = null;
-    if (pm) change = ((pm[1] === '-' || pm[1] === '−') ? '-' : '+') + pm[2] + '%';
-    else if (/暴增|突破|breakout/i.test(chgTxt)) change = 'breakout';
-    else if (/没有变化|无变化|no change/i.test(chgTxt)) change = '+0%';
-    return {{ rank, query, interest: Number.isFinite(interest) ? interest : null, change }};
-  }};
-  const parseRegionRow = (tr, i) => {{
-    const cells = Array.from(tr.querySelectorAll('td'));
-    if (cells.length < 3) return null;
-    const nameEl = cells[1].querySelector('[role="button"]') || cells[1];
-    const region = nameEl.textContent.trim();
-    if (!region) return null;
-    const bar = cells[2].querySelector('[role="img"]');
-    const rankText = (cells[0].textContent || '').trim();
-    const rank = /^\d+$/.test(rankText) ? parseInt(rankText, 10) : i + 1;
-    return {{ rank, region, geo_code: (bar && bar.getAttribute('data-geo-code')) || null, interest: Number.isFinite(interestOf(bar)) ? interestOf(bar) : null }};
-  }};
-  // 翻页按钮定位：从表格向上找第一层恰好只有一颗翻页按钮的祖先容器；若该层有多颗，
-  // 用元素归属判定——按钮向上找到的「单表容器」装的是不是当前这张表（不依赖坐标）
-  const isNextBtn = (b) => /下一页|next page|next/i.test(b.getAttribute('aria-label') || '');
-  const ownsTable = (btn, table) => {{
-    let p = btn;
-    for (let j = 0; j < 10 && p; j++) {{
-      p = p.parentElement;
-      if (!p) break;
-      const inner = p.querySelectorAll('table');
-      if (inner.length === 1) return inner[0] === table;
-    }}
-    return false;
-  }};
-  const nextBtnFor = (table) => {{
-    let el = table;
-    for (let i = 0; i < 10 && el; i++) {{
-      el = el.parentElement;
-      if (!el) break;
-      const btns = Array.from(el.querySelectorAll('button')).filter(isNextBtn);
-      if (btns.length === 1) return btns[0];
-      if (btns.length > 1) return btns.find((b) => ownsTable(b, table)) || null;
-    }}
-    // 兜底：整页只有一颗翻页按钮时直接用
-    const allBtns = Array.from(document.querySelectorAll('button')).filter(isNextBtn);
-    return allBtns.length === 1 ? allBtns[0] : null;
-  }};
-  const isDisabled = (btn) => !btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.hasAttribute('disabled');
-  // 点击翻页后 Google 会整体重渲染、替换 table 节点，所以每页都重新按结构解析表格引用
-  const resolveTable = (kind) => Array.from(document.querySelectorAll('table')).find((t) => kindOf(t) === kind);
-  const collect = async (getTable, parseRow) => {{
-    const seen = new Set();
-    const rows = [];
-    let available = false;
-    // 页数上限只作保险（区域表实测可达 14+ 页），正常由「按钮禁用」终止翻页
-    for (let p = 0; p < 30; p++) {{
-      const table = getTable();
-      if (!table) break;
-      available = true;
-      for (const r of Array.from(table.querySelectorAll('tbody tr')).map(parseRow)) {{
-        if (r && !seen.has(r.rank)) {{ rows.push(r); seen.add(r.rank); }}
-      }}
-      const nextBtn = nextBtnFor(table);
-      if (isDisabled(nextBtn)) break;
-      nextBtn.click();
-      // 等翻页完成：以「非空行数恢复到上一页水平」为准，避免新页面渲染到一半就被采走
-      const filledRows = (t) => Array.from(t.querySelectorAll('tbody tr')).filter((tr) => /^\d+$/.test(((tr.querySelector('td') || {{}}).textContent || '').trim())).length;
-      const prevCount = filledRows(table);
-      const deadline = Date.now() + 5000;
-      while (Date.now() < deadline) {{
-        const fresh = getTable();
-        const fr = fresh ? Array.from(fresh.querySelectorAll('tbody tr')).map(parseRow).find(Boolean) : null;
-        const ready = fresh && filledRows(fresh) >= prevCount && fr && !seen.has(fr.rank);
-        if (ready || (nextBtn && !nextBtn.isConnected)) break;
-        await sleep(300);
-      }}
-    }}
-    return {{ rows, available }};
-  }};
-  let topResult = await collect(() => resolveTable('top'), parseQueryRow);
-  let risingResult = await collect(() => resolveTable('rising'), parseQueryRow);
-  // 兜底：卡片标题匹配不到时（界面文案变化），未分类的查询表按文档顺序当 top/rising
-  if (!topResult.available && !risingResult.available) {{
-    const posTable = (idx) => {{
-      let ts = Array.from(document.querySelectorAll('table')).filter((t) => kindOf(t) === 'unknown');
-      if (!ts.length) ts = Array.from(document.querySelectorAll('table')).filter(isQueryHeader);
-      return ts[idx]; // DOM 文档顺序兜底，不做坐标排序
-    }};
-    if (!topResult.available) topResult = await collect(() => posTable(0), parseQueryRow);
-    if (!risingResult.available) risingResult = await collect(() => posTable(1), parseQueryRow);
-  }}
-  const regionsResult = await collect(() => resolveTable('region'), parseRegionRow);
-  const tablesAvailable = topResult.available || risingResult.available;
-  return {{ trend, top: topResult.rows, rising: risingResult.rows, regions: regionsResult.rows,
-    top_table_available: topResult.available, rising_table_available: risingResult.available,
-    tables_available: tablesAvailable }};
-}})()"#
-    )
+    SCRIPT.replace("__DATE_SPEC__", &date_lit)
 }
 
-/// 对比模式脚本：解析多折线（每个关键词一条线，mask 序号对应查询顺序），返回各词趋势序列。
-fn compare_script(terms: &[String], date_spec: &str) -> String {
-    let date_lit = serde_json::to_string(date_spec).unwrap_or_else(|_| "\"today 1-m\"".into());
-    let terms_json = serde_json::to_string(terms).unwrap_or_else(|_| "[]".into());
-    format!(
-        r#"(async () => {{
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const TERMS = {terms_json};
-  const N = TERMS.length;
-  const deadline = Date.now() + 20000;
-  const scrollAll = () => {{
-    window.scrollTo(0, document.body.scrollHeight);
-    Array.from(document.querySelectorAll('div')).forEach((el) => {{
-      if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = el.scrollHeight;
-    }});
-  }};
-  // 打开后先等 2~3 秒让页面完成首屏渲染，再从顶部到底部匀速下滑，恰好 5 秒走完：
-  // 进度按真实耗时计算，慢速经过每个区块，可见性机制（懒加载等）才来得及触发。
-  // 用 setTimeout 步进而非 requestAnimationFrame——后台标签页 rAF 不触发会卡死；
-  // 高度随懒加载增长时每帧重算最大值，保证 5 秒整仍能落到真实底部
-  const smoothScroll = async () => {{
-    await sleep(2000 + Math.random() * 1000);
-    const DURATION = 5000;
-    const start = Date.now();
-    for (;;) {{
-      const p = Math.min(1, (Date.now() - start) / DURATION);
-      window.scrollTo(0, Math.max(0, (document.body.scrollHeight - window.innerHeight) * p));
-      Array.from(document.querySelectorAll('div')).forEach((el) => {{
-        if (el.scrollHeight > el.clientHeight + 50) el.scrollTop = (el.scrollHeight - el.clientHeight) * p;
-      }});
-      if (p >= 1) break;
-      await sleep(50);
-    }}
-  }};
-  await smoothScroll();
-  let svg = null;
-  let lines = null;
-  let lastSeen = 0;
-  // 曲线判定不依赖 mask 和 d 长度（见 isLinePath 注释）；收集时遍历大 SVG，
-  // 取首个凑齐 N 条线的：兼容「inverse-mask 双份绘制」与「无 mask 普通 path」两种渲染变体
-  const isLinePath = (p, vbW) => {{
-    const d = p.getAttribute('d') || '';
-    const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
-    return (d.match(/M/g) || []).length === 1 && nums.length >= 100
-      && nums[0] <= 2 && nums[nums.length - 2] >= vbW * 0.7;
-  }};
-  const collectLines = () => {{
-    let plain = null;
-    for (const s of document.querySelectorAll('svg')) {{
-      if (s.getBoundingClientRect().width <= 100) continue;
-      const vbW = (s.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number)[2] || 1280;
-      const paths = Array.from(s.querySelectorAll('path'));
-      // 经典变体：每条线画两遍（inverse mask 与普通 mask），取 inverse 的一套，mask 序号即线序
-      const masked = paths.filter((p) => (p.getAttribute('mask') || '').includes('inverse-mask') && isLinePath(p, vbW));
-      if (masked.length === N) return {{ svg: s, paths: masked }};
-      // 无 mask 变体（稀疏数据等场景）：每条线一条普通 path，DOM 顺序即词条顺序
-      const unmasked = paths.filter((p) => !p.getAttribute('mask') && isLinePath(p, vbW));
-      if (unmasked.length === N) return {{ svg: s, paths: unmasked }};
-      if (unmasked.length > (plain ? plain.paths.length : 0)) plain = {{ svg: s, paths: unmasked }};
-    }}
-    return plain;
-  }};
-  while (Date.now() < deadline) {{
-    const got = collectLines();
-    if (got && got.paths.length === N) {{
-      svg = got.svg;
-      lines = got.paths;
-      break;
-    }}
-    if (got) lastSeen = Math.max(lastSeen, got.paths.length);
-    scrollAll();
-    await sleep(300);
-  }}
-  if (!lines || lines.length !== N) {{
-    return {{ error: 'comparison chart not loaded (expected ' + N + ' lines, got ' + (lines ? lines.length : lastSeen) + ')' }};
-  }}
-  const maskIdx = (p) => {{
-    const m = (p.getAttribute('mask') || '').match(/timeline-inverse-mask-\d+-(\d+)/);
-    return m ? parseInt(m[1], 10) : 0;
-  }};
-  lines.sort((a, b) => maskIdx(a) - maskIdx(b));
-
-  const parseLine = (p) => {{
-    const d = p.getAttribute('d');
-    const cmds = d.match(/[MC]/g) || [];
-    const nums = (d.match(/-?[\d.]+/g) || []).map(Number);
-    let ni = 0;
-    const ys = [];
-    for (const c of cmds) {{
-      if (c === 'M') {{ ys.push(nums[ni + 1]); ni += 2; }}
-      else {{ ys.push(nums[ni + 5]); ni += 6; }}
-    }}
-    return ys;
-  }};
-  const vb = (svg.getAttribute('viewBox') || '0 0 1384 320').split(/[\s,]+/).map(Number);
-  const svgTop = svg.getBoundingClientRect().y;
-  const labelY = {{}};
-  Array.from(document.querySelectorAll('svg text')).forEach((t) => {{
-    const v = t.textContent.trim();
-    if (v === '0' && labelY['0'] == null) labelY['0'] = t.getBoundingClientRect().y - svgTop;
-    if (v === '100' && labelY['100'] == null) labelY['100'] = t.getBoundingClientRect().y - svgTop;
-  }});
-  const y0 = labelY['0'] != null ? labelY['0'] : (vb[3] || 320);
-  const y100 = labelY['100'] != null ? labelY['100'] : 0;
-  const span = (y0 - y100) || 1;
-  const toValue = (y) => Math.max(0, Math.min(100, Math.round(((y0 - y) / span) * 100)));
-
-  // 日期：与单查询一致，从今天倒推
-  const DATE_SPEC = {date_lit};
-  const fmt = (dd) => dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0') + '-' + String(dd.getDate()).padStart(2, '0');
-  const buildDates = (spec, n) => {{
-    const now = new Date();
-    let end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    let start = null;
-    const s = String(spec).trim();
-    const m = s.match(/^today\s+(\d+)-([dmy])$/);
-    if (m) {{
-      const k = parseInt(m[1], 10);
-      start = new Date(end);
-      if (m[2] === 'd') start.setDate(end.getDate() - k);
-      else if (m[2] === 'm') start.setMonth(end.getMonth() - k);
-      else start.setFullYear(end.getFullYear() - k);
-    }} else if (s === 'all') {{
-      start = new Date(2004, 0, 1);
-    }} else {{
-      const dm = s.match(/^(\d{{4}}-\d{{2}}-\d{{2}})\s+(\d{{4}}-\d{{2}}-\d{{2}})$/);
-      if (dm) {{ start = new Date(dm[1]); end = new Date(dm[2]); }}
-    }}
-    // 无法识别的日期格式：回落为今天往前一个月，保证日期永不缺失
-    if (!start) {{ start = new Date(end); start.setMonth(end.getMonth() - 1); }}
-    if (n <= 0) return [];
-    const days = Math.round((end - start) / 86400000);
-    const back = (offset) => new Date(end.getFullYear(), end.getMonth(), end.getDate() - offset);
-    if (Math.abs(n - days) <= 2) return Array.from({{ length: n }}, (_, i) => fmt(back(n - 1 - i)));
-    const weekly = Math.round(days / 7);
-    if (Math.abs(n - weekly) <= 2) return Array.from({{ length: n }}, (_, i) => fmt(back((n - 1 - i) * 7)));
-    return Array.from({{ length: n }}, (_, i) => fmt(back(Math.round(((n - 1 - i) * days) / (n - 1 || 1)))));
-  }};
-
-  const counts = lines.map(parseLine);
-  const n = counts[0].length;
-  const dates = buildDates(DATE_SPEC, n);
-  const series = TERMS.map((term, i) => {{
-    const trend = counts[i].map((y, j) => ({{ date: dates[j] || null, value: toValue(y) }}));
-    return {{ term, trend }};
-  }});
-  return {{ series }};
-}})()"#
-    )
-}
-
-/// Google Trends：查询搜索趋势，返回趋势序列 + 热门/上升关键词。
-/// Google Trends：查询搜索趋势，返回趋势序列 + 热门/上升关键词 + 区域热度。
-/// 返回 `{ "tab_id": ..., "query": ..., "date": ..., "geo": ..., "trend": [...], "top": [...], "rising": [...], "regions": [...] }`。
-pub async fn googletrends(
-    bridge: &mut Bridge,
-    query: &str,
-    date: &str,
-    geo: &str,
-) -> Result<Value, String> {
-    let date = normalize_date(date);
-    let geo = if geo.trim().is_empty() {
-        DEFAULT_GEO
-    } else {
-        geo
-    };
-    let url = format!(
-        "https://trends.google.com/explore?q={}&date={}&geo={}",
-        urlencode(query),
-        urlencode(&date),
-        urlencode(geo)
-    );
-    let script = trends_script(&date);
-    let mut tab_id = Value::Null;
-    let mut data = Value::Null;
-    // Trends 同标签页反复导航时图表偶发不加载，新标签页则稳定。
-    // 每次查询新开标签页（扩展会记录，可用 close-auto-tabs 清理），失败则关掉重开。
-    for attempt in 0..3 {
-        let nav = bridge
-            .request("gt1", "new_tab", json!({ "url": url }))
-            .await?;
-        tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
-        let resp = bridge
-            .request_with_timeout(
-                "gt2",
+/// 等新标签页真正落到 trends.google.com 且应用壳起来。
+/// new_tab 在导航提交前就返回，直接跑采集脚本可能注入到空白文档。
+async fn wait_page_ready(bridge: &mut Bridge, tab_id: &Value) -> Result<(), String> {
+    for _ in 0..READY_POLLS {
+        let probe = bridge
+            .request(
+                "gt-ready",
                 "run_script",
-                json!({ "code": script, "tab_id": tab_id }),
-                GOOGLE_TRENDS_SCRIPT_TIMEOUT,
+                json!({
+                    "tab_id": tab_id,
+                    "code": "location.hostname === 'trends.google.com' && !!(document.querySelector('main') || document.querySelector('c-wiz'))",
+                }),
             )
-            .await?;
-        let got = resp.get("result").cloned().unwrap_or(Value::Null);
-        let is_chart_error = got
-            .get("error")
-            .and_then(Value::as_str)
-            .map(|s| s.contains("trend chart not loaded"))
-            .unwrap_or(false);
-        let missing_query_tables = got
-            .get("tables_available")
-            .and_then(Value::as_bool)
-            .map(should_retry_query_tables)
-            .unwrap_or(false);
-        if !is_chart_error && !missing_query_tables {
-            data = got;
-            break;
+            .await;
+        if probe
+            .ok()
+            .and_then(|v| v.get("result").and_then(Value::as_bool))
+            == Some(true)
+        {
+            return Ok(());
         }
-        // 图表或关键词表没加载出来：关掉这次开的标签页，下轮换新标签页重试
-        if tab_id.is_number() {
-            let _ = bridge
-                .request("gt3", "close_tab", json!({ "tab_id": tab_id }))
-                .await;
-        }
-        if attempt == 2 {
-            data = got;
-        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    if let Some(err) = data.get("error").and_then(Value::as_str) {
-        return Err(format!("googletrends: {err}"));
-    }
+    Err("Google Trends 页面未就绪（可能被限制或需要验证）".into())
+}
+
+/// 关掉本次开的标签页；失败不影响主流程。
+async fn close_tab_quietly(bridge: &mut Bridge, tab_id: &Value) {
+    let _ = bridge
+        .request("gt-close", "close_tab", json!({ "tab_id": tab_id }))
+        .await;
+}
+
+fn shape_result(data: &Value, tab_id: Value, query: &str, date: &str, geo: &str) -> Value {
     let top_table_available = data
         .get("top_table_available")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let rising_table_available = data
         .get("rising_table_available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let regions_available = data
+        .get("regions_available")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let tables_available = query_tables_available(top_table_available, rising_table_available)
@@ -604,14 +206,101 @@ pub async fn googletrends(
         "top_table_available": top_table_available,
         "rising_table_available": rising_table_available,
         "tables_available": tables_available,
+        "regions_available": regions_available,
+        "hydration": data.get("hydration").cloned().unwrap_or(Value::Null),
     });
     if !tables_available {
         out["note"] = json!(
             "当前会话 Google 显示的是 Gemini 变体界面，热门/上升关键词表未渲染（趋势数据不受影响）；如在经典界面下运行则会返回完整表格"
         );
     }
+    out
+}
 
-    Ok(out)
+/// 打开新版探索页并采集：趋势序列 + 热门/上升查询 + 地区热度。
+/// 返回 `{ "tab_id": ..., "query": ..., "date": ..., "geo": ..., "trend": [...], "top": [...], "rising": [...], "regions": [...] }`。
+/// 页面壳或图表始终不出现时换新标签页重试一次；表格缺失不算失败（无数据词本来就可能没有榜单）。
+pub async fn googletrends(
+    bridge: &mut Bridge,
+    query: &str,
+    date: &str,
+    geo: &str,
+) -> Result<Value, String> {
+    let date = normalize_date(date);
+    let geo = if geo.trim().is_empty() {
+        DEFAULT_GEO
+    } else {
+        geo
+    };
+    let url = format!(
+        "https://trends.google.com/explore?q={}&date={}&geo={}&hl=zh-CN",
+        urlencode(query),
+        urlencode(&date),
+        urlencode(geo)
+    );
+    let script = trends_script(&date);
+    let mut failure = String::from("未获取到趋势数据");
+
+    for attempt in 0..2 {
+        let nav = bridge
+            .request("gt1", "new_tab", json!({ "url": url }))
+            .await?;
+        let tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
+        if !tab_id.is_number() {
+            failure = "new_tab 未返回 tab_id".into();
+            continue;
+        }
+
+        if let Err(err) = wait_page_ready(bridge, &tab_id).await {
+            close_tab_quietly(bridge, &tab_id).await;
+            failure = err;
+            continue;
+        }
+
+        let result = bridge
+            .request_with_timeout(
+                "gt3",
+                "run_script",
+                json!({ "code": script, "tab_id": tab_id }),
+                GOOGLE_TRENDS_SCRIPT_TIMEOUT,
+            )
+            .await;
+        let data = match result {
+            Ok(resp) => resp.get("result").cloned().unwrap_or(Value::Null),
+            Err(err) => {
+                close_tab_quietly(bridge, &tab_id).await;
+                failure = err;
+                if attempt == 1 {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        // 脚本只在致命场景返回 error（页面壳没找到 / 图表没出来），都值得换新标签页再试
+        if let Some(err) = data.get("error").and_then(Value::as_str) {
+            close_tab_quietly(bridge, &tab_id).await;
+            failure = err.to_string();
+            if attempt == 1 {
+                break;
+            }
+            continue;
+        }
+
+        return Ok(shape_result(&data, tab_id, query, &date, geo));
+    }
+
+    Err(format!("googletrends: {failure}"))
+}
+
+/// 对比模式脚本：解析多折线（每个关键词一条线，mask 序号对应查询顺序），返回各词趋势序列。
+/// 把关键词与日期写进对比脚本（脚本只读首屏多折线图，不需要滚动）。
+fn compare_script(terms: &[String], date_spec: &str) -> String {
+    let date_lit = serde_json::to_string(date_spec).unwrap_or_else(|_| "\"today 1-m\"".into());
+    let terms_json = serde_json::to_string(terms).unwrap_or_else(|_| "[]".into());
+    COMPARE_SCRIPT
+        .replace("__TERMS__", &terms_json)
+        .replace("__DATE_SPEC__", &date_lit)
 }
 
 /// Google Trends 关键词对比：多个关键词的走势对比（共享 0-100 刻度，不返回热门/上升表）。
@@ -638,56 +327,70 @@ pub async fn googletrends_compare(
         .collect::<Vec<_>>()
         .join(",");
     let url = format!(
-        "https://trends.google.com/explore?q={}&date={}&geo={}",
+        "https://trends.google.com/explore?q={}&date={}&geo={}&hl=zh-CN",
         urlencode(&q),
         urlencode(&date),
         urlencode(geo)
     );
 
     let script = compare_script(terms, &date);
-    let mut tab_id = Value::Null;
-    let mut data = Value::Null;
-    for attempt in 0..3 {
+    let mut failure = String::from("未获取到对比数据");
+
+    for attempt in 0..2 {
         let nav = bridge
             .request("gtc1", "new_tab", json!({ "url": url }))
             .await?;
-        tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
-        let resp = bridge
+        let tab_id = nav.get("tab_id").cloned().unwrap_or(Value::Null);
+        if !tab_id.is_number() {
+            failure = "new_tab 未返回 tab_id".into();
+            continue;
+        }
+
+        if let Err(err) = wait_page_ready(bridge, &tab_id).await {
+            close_tab_quietly(bridge, &tab_id).await;
+            failure = err;
+            continue;
+        }
+
+        let result = bridge
             .request_with_timeout(
                 "gtc2",
                 "run_script",
                 json!({ "code": script, "tab_id": tab_id }),
                 GOOGLE_TRENDS_SCRIPT_TIMEOUT,
             )
-            .await?;
-        let got = resp.get("result").cloned().unwrap_or(Value::Null);
-        let is_chart_error = got
-            .get("error")
-            .and_then(Value::as_str)
-            .map(|s| s.contains("chart not loaded"))
-            .unwrap_or(false);
-        if !is_chart_error {
-            data = got;
-            break;
+            .await;
+        let data = match result {
+            Ok(resp) => resp.get("result").cloned().unwrap_or(Value::Null),
+            Err(err) => {
+                close_tab_quietly(bridge, &tab_id).await;
+                failure = err;
+                if attempt == 1 {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        // 只在页面/图表始终不出现时重试（脚本 error），数据为空不算失败
+        if let Some(err) = data.get("error").and_then(Value::as_str) {
+            close_tab_quietly(bridge, &tab_id).await;
+            failure = err.to_string();
+            if attempt == 1 {
+                break;
+            }
+            continue;
         }
-        if tab_id.is_number() {
-            let _ = bridge
-                .request("gtc3", "close_tab", json!({ "tab_id": tab_id }))
-                .await;
-        }
-        if attempt == 2 {
-            data = got;
-        }
-    }
-    if let Some(err) = data.get("error").and_then(Value::as_str) {
-        return Err(format!("googletrends-compare: {err}"));
+
+        return Ok(json!({
+            "tab_id": tab_id,
+            "terms": terms,
+            "date": date,
+            "geo": geo,
+            "series": data.get("series").cloned().unwrap_or_else(|| json!([])),
+            "hydration": data.get("hydration").cloned().unwrap_or(Value::Null),
+        }));
     }
 
-    Ok(json!({
-        "tab_id": tab_id,
-        "terms": terms,
-        "date": date,
-        "geo": geo,
-        "series": data.get("series").cloned().unwrap_or_else(|| json!([])),
-    }))
+    Err(format!("googletrends-compare: {failure}"))
 }

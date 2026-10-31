@@ -260,8 +260,7 @@ cargo run -- youtuberinfo '@xiaojunpodcast' --max 20   # 最多返回 20 条
 
 ### googletrends
 
-Google Trends 趋势查询，返回 `{ tab_id, trend[], top[], rising[] }`：
-Google Trends 趋势查询，返回 `{ tab_id, trend[], top[], rising[], regions[] }`：
+Google Trends 趋势查询，返回 `{ tab_id, query, date, geo, trend[], top[], rising[], regions[] }`：
 
 ```sh
 cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
@@ -269,10 +268,14 @@ cargo run -- googletrends 'ai image' --date 'today 1-m' --geo Worldwide
 
 - `trend`：时间序列 `[{ date, value }]`，`value` 为 0-100 相对热度（从图表 SVG 曲线坐标反解 + y 轴刻度校准）
 - `top` / `rising`：热门查询与热度上升的查询（排名、关键词、热度、变化百分比），自动翻完所有分页
-- `regions`：按地区显示的搜索热度 `[{ rank, region, geo_code, interest }]`，`geo_code` 为 ISO 地区码，同样自动翻完分页（实测可达 66 个地区）
+- `regions`：按地区显示的搜索热度 `[{ rank, region, geo_code, interest }]`，`geo_code` 为 ISO 地区码，同样自动翻完分页（实测可达 56 个地区）
 - `--date` 支持 `today 1-m`（默认）/ `today 3-m` / `today 12-m` / `today 5-y` / `all`，`--geo` 默认 `Worldwide`
-- 关键词表是懒加载的，需要滚动到底部才渲染，配方会自动滚动内部容器等待表格数据
+- 新版探索页有两道闸门：趋势线/区域随页面加载取数（与滚动无关）；热门/上升查询卡片要进入视口才挂载，**并且挂载时才发数据请求**（先空骨架、拿到响应才填充）。滚动容器还带 `scroll-behavior:smooth`。配方会**尽早滚到卡片（等于尽早发请求）并关掉平滑滚动**，按状态等待内容（不靠固定 sleep），区域榜先行采集、与查询数据的等待重叠；分页是纯前端点击，用页面自带的 `第 X – Y 行（共 N 行）` 判断结束
+- 典型耗时 10–14s（页面自身的批量 RPC 就要 9–19s），比旧的"匀速滚 5s + 20s deadline"更稳；契约不变：`top_table_available` / `rising_table_available` / `tables_available` 表示对应榜单是否读到（空榜单也算 `true`），`regions_available` 表示地区榜；`hydration` 字段带各阶段时间与完整性诊断
+- 图表始终不出现时换新标签页重试一次；表格缺失不算失败（无数据词本来就可能没有榜单）
 - 每次查询新开一个标签页（同标签页反复导航时图表偶发不加载，新标签页稳定），这些标签页会被扩展记录，可用 `close-auto-tabs` 清理
+
+页面机制与实测数据见 [`docs/google-trends-lazy-loading.md`](docs/google-trends-lazy-loading.md)。
 
 ### oldgoogletrends
 
@@ -303,6 +306,11 @@ cargo run -- googletrends-compare 'ai image' 'GPTs' --date 'today 1-m' --geo Wor
 
 `terms` 也可用逗号分隔写成一个参数（`'ai image,GPTs'`）。`--date` / `--geo` 与 `googletrends` 一致。
 
+- 只读首屏那张多折线图，**不滚动页面**（旧版会先等 2–3s、再匀速滚 5s，纯属浪费）：按状态等 N 条折线出现，最多 45s
+- 兼容两种渲染变体：`inverse-mask` 双份绘制 与 无 mask 普通 path；曲线判定与 `googletrends` 一致
+- `series` 每条 `{ term, trend: [{ date, value }] }`，共享 0–100 刻度；额外返回 `hydration`（折线出现时间、点数、耗时）
+- 典型耗时 6–13s（取决于图表数据到达时间）
+
 ### oldgoogletrends-compare
 
 经典版（legacy）多关键词走势对比，返回 `{ tab_id, terms[], date, geo, series[] }`，每个关键词一条趋势序列，**共享 0-100 刻度**，不返回热门/上升查询表：
@@ -331,7 +339,8 @@ bridge-core/              # 共享库（CLI 与 MCP 复用）
     ├── youtubesearch.rs  # YouTube 搜索（解析 ytInitialData + InnerTube 翻页 + sp 筛选）
     ├── youtubeinfo.rs    # YouTube 视频详情（字幕全文 + 点赞/评论/订阅数，InnerTube 接口）
     ├── youtuberinfo.rs   # YouTube 频道视频列表（频道名/订阅数/视频列表，InnerTube 翻页）
-    ├── googletrends.rs   # Google Trends（SVG 反解 + 表格解析 + 多词对比）
+    ├── googletrends.rs   # Google Trends（参数校验 + 两阶段编排 + 多词对比）
+    ├── googletrends.js   # 新版探索页采集（早挂载 + 状态等待 + 客户端翻页 + SVG 反解）
     ├── oldgoogletrends.rs # 经典版 Trends（参数校验 + 浏览器编排）
     ├── oldgoogletrends.js # 经典版 DOM 读取 + 切换/翻页
     └── oldgoogletrends_compare.js # 经典版多词对比 DOM 读取
