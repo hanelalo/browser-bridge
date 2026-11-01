@@ -11,11 +11,20 @@ Claude / Cursor / Codex 等 agent
    bridge-mcp（Rust）          ← 本仓库新增的 MCP server
         │  WebSocket
         ▼
-   bridge-server（Rust 枢纽，127.0.0.1:9225，空闲 120s 自动退出）
+   bridge-server（Rust 枢纽，127.0.0.1:9225）
         │  WebSocket
         ▼
    Chrome 扩展（Browser Bridge；每个 agent 自动拥有独立专用窗口）
 ```
+
+MCP 传输有两种，工具集完全相同（`bridge-server` 复用 `bridge-mcp` 的同一套代码）：
+
+| 传输 | 入口 | 特点 |
+|------|------|------|
+| stdio | `bridge-mcp` 子进程 | 客户端自动拉起进程；连不上 server 会自动拉起 bridge-server |
+| Streamable HTTP | `http://127.0.0.1:9226/mcp`（`bridge-server` 内置） | 无需每人一个子进程，适合支持 HTTP 传输的客户端；需要 bridge-server 已在运行 |
+
+上面 stdio 的“自动拉起”指的是：连不上 server 时代为启动一个。server **没有空闲退出逻辑**，进程活着就一直服务；多个 agent 共用同一个 server 进程（已存在时不会另起新实例），日常推荐用 `./scripts/server.sh start` 放后台常驻（支持 `stop` / `restart` / `status` / `logs`；pid 在 `.run/`，日志在 `/tmp/bridge-server.log`）。
 
 所有组件都是本地进程：扩展在浏览器里，其余跑在你自己机器上，浏览器页面数据不出本机。
 
@@ -113,6 +122,27 @@ cd extension && pnpm install && pnpm build
 ```sh
 claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bridge-mcp
 ```
+
+**HTTP 传输（可选）**：先让 `bridge-server` 常驻运行，再指向它内置的 MCP 端点——不需要为每个 agent 起 `bridge-mcp` 子进程：
+
+```sh
+./target/release/bridge-server          # 默认：WS 枢纽 9225 + MCP over HTTP 9226
+```
+
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "type": "http",
+      "url": "http://127.0.0.1:9226/mcp"
+    }
+  }
+}
+```
+
+端点见 `http://127.0.0.1:9226/mcp`，健康检查 `http://127.0.0.1:9226/health`。`BRIDGE_HTTP_PORT=0` 可关闭；只绑回环地址（`BRIDGE_HTTP_BIND` 可改，对外暴露请自行加认证/反代）。
+
+HTTP 会话共用一个内部 client 身份（相当于一个 agent）：共用同一个专用窗口，同窗口内串行执行；需要并行时传不同 `window_id`，或改用 stdio 版（每个进程独立身份）。
 
 配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`youtuberinfo`、`googletrends`、`oldgoogletrends`、`googletrends_compare`、`oldgoogletrends_compare`、`close_auto_tabs` 等）。
 
@@ -420,6 +450,7 @@ Chrome 138+ 需要在扩展详情页打开「允许用户脚本」开关（见�
 - Chrome 没在运行也没关系：首次工具调用会自动拉起默认 Chrome 并等待扩展连上（最长约 30 秒）
 - 首次调用会自动拉起 server，稍等几秒重试
 - 换端口：`BRIDGE_SERVER=ws://127.0.0.1:9226` 环境变量（server 端用 `BRIDGE_PORT`）
+- 用 HTTP 传输时 server 不会被自动拉起：先手动启动 `bridge-server`，再确认 `curl http://127.0.0.1:9226/health` 返回 200
 
 **标签页 / 窗口堆积**
 

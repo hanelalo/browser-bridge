@@ -11,3 +11,6 @@ dist/
 .DS_Store
 *.log
 .env
+
+# runtime state (scripts/server.sh)
+.run/

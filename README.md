@@ -9,19 +9,30 @@
 | 目录 | 技术 | 职责 |
 |------|------|------|
 | `extension/` | Vue 3 + TypeScript（WXT / Manifest V3） | 安装在浏览器里，执行指令 |
-| `server/` | Rust（tokio + tokio-tungstenite） | WebSocket 枢纽，路由指令与响应 |
+| `server/` | Rust（tokio + tokio-tungstenite） | WebSocket 枢纽，路由指令与响应；可选内置 MCP over HTTP |
 | `client/` | Rust CLI（clap） | 发指令、打印结果 |
 | `bridge-core/` | Rust 共享库 | 传输层（连接/自动拉起/重连）、元素定位、站点配方 |
-| `bridge-mcp/` | Rust（rmcp，MCP server） | stdio 暴露全部指令为 MCP tools，供 Claude / Codex / Cursor 调用 |
+| `bridge-mcp/` | Rust（rmcp，MCP server） | 把全部指令暴露为 MCP tools（stdio；`bridge-server` 复用同一套工具提供 HTTP 传输） |
 
 ## 快速开始
 
 ### 1. 启动 server
 
+推荐用管理脚本后台常驻（server **不会自动退出**，多个 agent 共享同一个进程）：
+
+```sh
+./scripts/build.sh              # 首次先构建
+./scripts/server.sh start       # 后台启动（start|stop|restart|status|logs）
+./scripts/server.sh status
+```
+
+也可以前台跑，方便看日志：
+
 ```sh
 cd server
-cargo run            # 默认监听 ws://127.0.0.1:9225
+cargo run            # 默认监听 ws://127.0.0.1:9225（MCP over HTTP 另开 9226）
 # 换端口：BRIDGE_PORT=9226 cargo run
+# 关闭 HTTP MCP：BRIDGE_HTTP_PORT=0 cargo run
 ```
 
 ### 2. 加载插件
@@ -38,7 +49,7 @@ pnpm dev             # 会自动打开 Chrome 并加载开发版插件
 
 ### 3. 使用 client
 
-client 连接失败时会**自动拉起 bridge-server**（需要已构建的二进制，可用 `BRIDGE_SERVER_BIN` 指定路径），自动拉起的 server 空闲 120 秒自动退出；插件断线后按 500ms→5s 退避自动重连。
+client 连接失败时会**自动拉起 bridge-server**（需要已构建的二进制，可用 `BRIDGE_SERVER_BIN` 指定路径）；插件断线后按 500ms→5s 退避自动重连。
 
 ```sh
 cd client
@@ -361,12 +372,50 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 ```
 
 - 默认连 `ws://127.0.0.1:9225`，可用 `BRIDGE_SERVER` 覆盖；
-- 连接失败会自动拉起 `bridge-server`（空闲 120s 自动退出），断线自动重连；
+- 连接失败会自动拉起 `bridge-server`，断线自动重连；
 - Chrome 没在运行会自动拉起默认 Chrome（共享 profile），等扩展连上后重试（最长约 30 秒）；
 - 每个 agent（`mcp-` 身份）默认拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；工具也可传 `window_id` 在多个窗口间调度。
 - server 全局最多同时执行 3 个任务，同一个窗口同时只执行 1 个任务；站点配方会持有窗口任务租约直到流程结束。
 - MCP 结束或断线不会退出共享 Chrome；窗口清理由显式工具调用发起，并经过 server 调度；
 - 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare` / `oldgoogletrends_compare`。
+
+### MCP over HTTP（可选）
+
+`bridge-server` 启动时会额外在 **独立端口** 上提供 Streamable HTTP 传输的 MCP 端点，工具集与 stdio 版 `bridge-mcp` 完全一致（同一套代码、同一套 hub 调度），原来的 WebSocket 协议与端口一字未变。
+
+```text
+http://127.0.0.1:9226/mcp     # MCP 端点（POST/GET/DELETE）
+http://127.0.0.1:9226/health  # 健康检查
+```
+
+- 面向支持远程/HTTP 传输的 MCP 客户端（如 `"type": "http"` / `"url": ...` 这类配置），不需要为每个 agent 起一个子进程；
+- 工具调用通过本机回环 WebSocket（client 角色）回到同一个 hub，因此调度、并发限额、window/task 语义与 stdio 版完全一致；
+- 不自动拉起：HTTP 模式下需要 `bridge-server` 已在运行（stdio 版 `bridge-mcp` 才有自动拉起），推荐 `./scripts/server.sh start` 常驻；
+- 只监听回环地址；`BRIDGE_HTTP_PORT=0` 可完全关闭，`BRIDGE_HTTP_BIND` 可改绑定地址（对外暴露请自行加认证/反代）。
+- 所有 HTTP 会话共享一个内部 client 身份（相当于一个 agent）：共用同一个专用窗口，同一窗口内的工具调用串行执行。需要并行时传不同的 `window_id`，或改用 stdio 版（每个进程一个独立身份/窗口）。
+
+客户端配置示例：
+
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "type": "http",
+      "url": "http://127.0.0.1:9226/mcp"
+    }
+  }
+}
+```
+
+验证：
+
+```sh
+curl -s http://127.0.0.1:9226/health
+curl -s -X POST http://127.0.0.1:9226/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+```
 
 #### 配置示例
 
@@ -417,6 +466,29 @@ Cursor（`.cursor/mcp.json`）：
 | `bridge-mcp` | `target/release/bridge-mcp` | MCP server，配给 Claude Desktop / Cursor 等 |
 | 扩展 | `extension/dist/chrome-mv3` | `chrome://extensions` 加载已解压目录 |
 
+### 后台常驻管理（`scripts/server.sh`）
+
+`bridge-server` 没有空闲退出逻辑：进程活着就一直服务，所有 agent 共享同一个进程（已存在时不会再起新的，抢不到端口的多余进程会自行退出）。所以日常推荐用脚本把它放后台：
+
+```sh
+./scripts/server.sh start      # 后台启动；已运行则直接报告，不重复启动
+./scripts/server.sh status     # 进程 / 端口 / HTTP 健康（未运行退出码 3）
+./scripts/server.sh stop       # 停止
+./scripts/server.sh restart    # 重启（改了二进制后用它）
+./scripts/server.sh logs       # tail -f 日志
+```
+
+- pid 存在 `.run/bridge-server.pid`（已 gitignore），日志写到 `/tmp/bridge-server.log`（`BRIDGE_LOG` 可改，目录不存在会自动创建）；
+- `start` 发现端口被占（比如 agent 已自动拉起一个）会拒绝启动并提示先 `stop`，避免两个实例抢 9225；
+- `stop` 除了停 pidfile 里的实例，还会清理“未托管”的 bridge-server（只杀命令行确实是 `bridge-server` 且监听该端口的进程）；
+- 停止是立即结束进程（不做优雅排空）：在途的浏览器操作结果会丢失，但扩展会保留未完成执行的记录，新 server 起来后会接管并回收额度；
+- 端口/绑定通过环境变量传给子进程：`BRIDGE_PORT`（9225）、`BRIDGE_HTTP_PORT`（9226，`0` 关闭）、`BRIDGE_HTTP_BIND`（127.0.0.1）；
+- 其它可用环境变量：`BRIDGE_SERVER_BIN`（指定二进制）、`BRIDGE_LOG`（日志路径，默认 `/tmp/bridge-server.log`）、`BRIDGE_RUN_DIR`（pid 目录）、`BRIDGE_START_TIMEOUT`（就绪等待秒数，默认 10）。
+
+```sh
+BRIDGE_PORT=9325 BRIDGE_HTTP_PORT=9326 ./scripts/server.sh start
+```
+
 ### 元素定位
 
 统一支持三种方式，均可加 `--index` 指定第几个匹配：
@@ -452,7 +524,10 @@ cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 | 项 | 默认 | 说明 |
 |----|------|------|
 | server 端口 | 9225 | 环境变量 `BRIDGE_PORT` |
-| server 空闲退出 | 0（不退出） | 环境变量 `BRIDGE_IDLE_TIMEOUT`（秒）；客户端自动拉起时默认 120 |
+| server MCP over HTTP 端口 | 9226（`/mcp`） | 环境变量 `BRIDGE_HTTP_PORT`，`0` 关闭 |
+| server MCP over HTTP 绑定地址 | `127.0.0.1` | 环境变量 `BRIDGE_HTTP_BIND` |
+| server 常驻时间 | 不退出 | 没有空闲退出逻辑；停止请用 `./scripts/server.sh stop`（或直接结束进程） |
+| 后台管理 | `scripts/server.sh` | `start` / `stop` / `restart` / `status` / `logs`；pid 在 `.run/`，日志在 `/tmp/bridge-server.log` |
 | 插件连接地址 | `ws://127.0.0.1:9225` | 构建时 `WXT_PUBLIC_BRIDGE_URL=ws://... pnpm build` |
 | client 服务地址 | `ws://127.0.0.1:9225` | `--server` 或环境变量 `BRIDGE_SERVER` |
 | client 自动拉起 | 已构建的 `bridge-server` | `BRIDGE_SERVER_BIN` 指定路径，否则按同目录 / target / PATH 查找 |

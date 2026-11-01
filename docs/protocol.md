@@ -2,6 +2,8 @@
 
 传输层为 WebSocket，默认地址 `ws://127.0.0.1:9225`。所有消息均为 JSON 文本帧。
 
+> 本文件描述的 WebSocket 协议与端口未因 MCP over HTTP 发生任何改变。`bridge-server` 额外在 `127.0.0.1:9226/mcp` 提供 MCP（Streamable HTTP）端点，内部以一个普通 client 连接回到同一个 hub。
+
 ## 连接握手
 
 连接建立后，第一条消息必须是 hello：

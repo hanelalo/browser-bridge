@@ -1041,23 +1041,13 @@ fn wire_result(msg: &WireMessage) -> Result<Value, String> {
             .unwrap_or_else(|| "extension request failed".into()))
     }
 }
-pub(super) async fn hub_loop(
-    mut rx: mpsc::UnboundedReceiver<HubMsg>,
-    _tx: mpsc::UnboundedSender<HubMsg>,
-    idle_timeout: Duration,
-) {
+pub(super) async fn hub_loop(mut rx: mpsc::UnboundedReceiver<HubMsg>) {
     let mut hub = Hub::new();
-    let mut last_activity = Instant::now();
     let mut ticker = tokio::time::interval(Duration::from_millis(20));
     loop {
         tokio::select! {
-            event=rx.recv()=>match event{Some(event)=>{last_activity=Instant::now();hub.event(event);},None=>break},
-            _=ticker.tick()=>{
-                hub.tick();
-                if !idle_timeout.is_zero()&&hub.tasks.is_empty()&&hub.resolutions.is_empty()&&last_activity.elapsed()>=idle_timeout {
-                    eprintln!("[hub] idle, exiting");std::process::exit(0);
-                }
-            }
+            event=rx.recv()=>match event{Some(event)=>hub.event(event),None=>break},
+            _=ticker.tick()=>hub.tick(),
         }
     }
 }

@@ -1,11 +1,13 @@
 //! WebSocket transport. Scheduling and task ownership live in hub.
+//! MCP over HTTP (Streamable HTTP) lives in mcp_http and reuses the same hub.
 mod hub;
+mod mcp_http;
 
 use futures_util::{SinkExt, StreamExt};
 use hub::{hub_loop, HubMsg};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
@@ -13,6 +15,8 @@ use tokio::{
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 const DEFAULT_PORT: u16 = 9225;
+/// MCP over HTTP 的默认端口（可用 `BRIDGE_HTTP_PORT` 覆盖，设为 0 关闭）
+const DEFAULT_HTTP_PORT: u16 = 9226;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Role {
@@ -171,23 +175,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_PORT);
-    let idle_timeout = std::env::var("BRIDGE_IDLE_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::ZERO);
     let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr).await?;
-    let idle_note = if idle_timeout.is_zero() {
-        String::new()
-    } else {
-        format!("（空闲 {}s 自动退出）", idle_timeout.as_secs())
-    };
-    eprintln!("browser-bridge server listening on ws://{addr} {idle_note}");
+    let http_port = std::env::var("BRIDGE_HTTP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_HTTP_PORT);
+    let http_bind = std::env::var("BRIDGE_HTTP_BIND").unwrap_or_else(|_| "127.0.0.1".into());
+    eprintln!("browser-bridge server listening on ws://{addr}");
+    if http_port != 0 {
+        eprintln!("browser-bridge MCP over HTTP: http://{http_bind}:{http_port}/mcp");
+    }
 
     let (hub_tx, hub_rx) = mpsc::unbounded_channel();
-    tokio::spawn(hub_loop(hub_rx, hub_tx.clone(), idle_timeout));
+    tokio::spawn(hub_loop(hub_rx));
 
+    if http_port != 0 {
+        // 独立端口、独立 HTTP 栈：原有 WS 行为与协议不变。
+        match format!("{http_bind}:{http_port}").parse::<SocketAddr>() {
+            Ok(http_addr) => {
+                let ws_url = format!("ws://127.0.0.1:{port}");
+                tokio::spawn(async move { mcp_http::serve(http_addr, ws_url).await });
+            }
+            Err(error) => eprintln!(
+                "invalid BRIDGE_HTTP_BIND/BRIDGE_HTTP_PORT: {error}; HTTP MCP disabled"
+            ),
+        }
+    }
+
+    run_ws(listener, hub_tx).await?;
+    Ok(())
+}
+
+async fn run_ws(
+    listener: TcpListener,
+    hub_tx: mpsc::UnboundedSender<HubMsg>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut next_id: u64 = 0;
     loop {
         let (stream, addr) = listener.accept().await?;

@@ -76,7 +76,7 @@ function content(response) {
   return JSON.parse(response.result.content[0].text);
 }
 try {
-  const server = child('bridge-server', { BRIDGE_PORT: `${port}`, BRIDGE_IDLE_TIMEOUT: '0' });
+  const server = child('bridge-server', { BRIDGE_PORT: `${port}` });
   await until(() => logs.includes('listening'), 'server startup');
   let extension = await browser();
   const mcp = child('bridge-mcp', { BRIDGE_SERVER: url });

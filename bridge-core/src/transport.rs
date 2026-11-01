@@ -19,8 +19,6 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
-/// 自动拉起 server 时的空闲退出时间（秒）
-pub const AUTO_SPAWN_IDLE_TIMEOUT: &str = "120";
 
 pub type BridgeStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -64,11 +62,23 @@ impl Bridge {
     /// 指定客户端身份（多 agent 场景下每个调用方用独立 id，用于标签页归属与清理隔离）
     pub async fn connect_with_client_id(server: &str, client_id: &str) -> Result<Self, String> {
         let ws = connect_bridge(server, client_id).await?;
+        Ok(Self::spawn_transport(server, client_id, ws))
+    }
+
+    /// Same as [`Bridge::connect_with_client_id`] but never spawns a new
+    /// bridge-server process. Used by bridge-server itself (embedded MCP over
+    /// HTTP), where a self-spawn would be wrong.
+    pub async fn connect_no_spawn(server: &str, client_id: &str) -> Result<Self, String> {
+        let ws = connect_bridge_no_spawn(server, client_id).await?;
+        Ok(Self::spawn_transport(server, client_id, ws))
+    }
+
+    fn spawn_transport(server: &str, client_id: &str, ws: BridgeStream) -> Self {
         let (requests, request_rx) = mpsc::unbounded_channel();
         let server_name = server.to_string();
         let client_name = client_id.to_string();
         tokio::spawn(connection_manager(server_name, client_name, ws, request_rx));
-        Ok(Self {
+        Self {
             server: server.to_string(),
             client_id: client_id.to_string(),
             window_id: None,
@@ -76,7 +86,7 @@ impl Bridge {
             task_guard: None,
             agent_id: None,
             requests,
-        })
+        }
     }
 
     pub fn client_id(&self) -> &str {
@@ -421,9 +431,7 @@ pub async fn connect_bridge(server: &str, client_id: &str) -> Result<BridgeStrea
             // server 未运行：自动拉起一个，并等它就绪
             match spawn_bridge_server(server) {
                 Ok(_) => {
-                    eprintln!(
-                        "已自动启动 bridge-server（空闲 {AUTO_SPAWN_IDLE_TIMEOUT}s 自动退出）"
-                    );
+                    eprintln!("已自动启动 bridge-server");
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                     loop {
                         match connect_async(server).await {
@@ -485,7 +493,6 @@ fn spawn_bridge_server(server: &str) -> Result<(), String> {
     #[cfg(unix)]
     cmd.process_group(0);
     cmd.env("BRIDGE_PORT", &port)
-        .env("BRIDGE_IDLE_TIMEOUT", AUTO_SPAWN_IDLE_TIMEOUT)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
