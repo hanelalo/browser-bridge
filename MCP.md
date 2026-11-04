@@ -144,8 +144,9 @@ claude mcp add browser-bridge -- /绝对路径/browser-bridge/target/release/bri
 
 HTTP 会话共用一个内部 client 身份（相当于一个 agent）：共用同一个专用窗口，同窗口内串行执行；需要并行时传不同 `window_id`，或改用 stdio 版（每个进程独立身份）。
 
-配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`youtuberinfo`、`googletrends`、`oldgoogletrends`、`googletrends_compare`、`oldgoogletrends_compare`、`close_auto_tabs` 等）。
+HTTP 端点无状态：不下发也不校验 `Mcp-Session-Id`，不会出现「停留几分钟后 404 Session not found」，server 重启也不需要重新 initialize；不支持 GET 的 SSE 长连接（返回 405，规范允许）。
 
+配置好后在客户端里应该能看到 20+ 个工具（`list_tabs`、`navigate`、`click`、`scrape`、`googlesearch`、`redditsearch`、`youtubesearch`、`youtubeinfo`、`youtuberinfo`、`googletrends`、`oldgoogletrends`、`googletrends_compare`、`oldgoogletrends_compare`、`close_auto_tabs` 等）。
 ## 可用工具
 
 工具分两类：**协议原语**（通用指令，任何网站都能用）与**站点配方**（搜索/查询专用快捷指令，返回结构化 JSON）。

@@ -51,7 +51,12 @@ pub(crate) async fn serve(addr: SocketAddr, ws_url: String) {
         StreamableHttpService::new(
             move || Ok(mcp.clone()),
             Arc::new(LocalSessionManager::default()),
-            StreamableHttpServerConfig::default(),
+            // 无状态：不签发 Mcp-Session-Id，也不校验它。
+            // 否则 rmcp 的会话默认 5 分钟无活动就被回收，客户端拿着旧 session id
+            // 再来请求就是 404 "Session not found"（server 重启同样会命中）。
+            // 本服务的工具状态都在 hub / 工具参数里，不依赖 MCP 会话，
+            // 所以逐请求直接服务即可。
+            StreamableHttpServerConfig::default().with_legacy_session_mode(false),
         );
     eprintln!("[mcp-http] MCP over HTTP listening on http://{addr}{MCP_PATH}");
 
@@ -114,10 +119,20 @@ async fn dispatch(
             json!({"error": format!("unknown path {path}; MCP endpoint is {MCP_PATH}")}),
         );
     }
-    match service.call(request).await {
+    let method = request.method().clone();
+    let response = match service.call(request).await {
         Ok(response) => response,
         Err(never) => match never {},
+    };
+    // 只有异常状态才打日志：正常调用不污染日志，出问题时能直接看出端点行为。
+    if response.status().is_client_error() || response.status().is_server_error() {
+        eprintln!(
+            "[mcp-http] {method} {path} -> {} {}",
+            response.status().as_u16(),
+            response.status().canonical_reason().unwrap_or("")
+        );
     }
+    response
 }
 
 fn json_response(status: StatusCode, value: serde_json::Value) -> HttpResponse {

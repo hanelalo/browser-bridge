@@ -384,7 +384,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 `bridge-server` 启动时会额外在 **独立端口** 上提供 Streamable HTTP 传输的 MCP 端点，工具集与 stdio 版 `bridge-mcp` 完全一致（同一套代码、同一套 hub 调度），原来的 WebSocket 协议与端口一字未变。
 
 ```text
-http://127.0.0.1:9226/mcp     # MCP 端点（POST/GET/DELETE）
+http://127.0.0.1:9226/mcp     # MCP 端点（POST；GET/DELETE 返回 405）
 http://127.0.0.1:9226/health  # 健康检查
 ```
 
@@ -392,6 +392,7 @@ http://127.0.0.1:9226/health  # 健康检查
 - 工具调用通过本机回环 WebSocket（client 角色）回到同一个 hub，因此调度、并发限额、window/task 语义与 stdio 版完全一致；
 - 不自动拉起：HTTP 模式下需要 `bridge-server` 已在运行（stdio 版 `bridge-mcp` 才有自动拉起），推荐 `./scripts/server.sh start` 常驻；
 - 只监听回环地址；`BRIDGE_HTTP_PORT=0` 可完全关闭，`BRIDGE_HTTP_BIND` 可改绑定地址（对外暴露请自行加认证/反代）。
+- **无状态**：不下发也不校验 `Mcp-Session-Id`，每个请求独立服务。所以不会出现「空闲几分钟后 404 Session not found」，server 重启后客户端也不需要重新 initialize（工具状态本身在 hub 和 `task_id` 里，不依赖 MCP 会话）；代价是不支持 GET 的 SSE 长连接（返回 405，规范允许）。
 - 所有 HTTP 会话共享一个内部 client 身份（相当于一个 agent）：共用同一个专用窗口，同一窗口内的工具调用串行执行。需要并行时传不同的 `window_id`，或改用 stdio 版（每个进程一个独立身份/窗口）。
 
 客户端配置示例：
