@@ -8,6 +8,7 @@
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use super::schedule_auto_close;
 use crate::transport::{urlencode, Bridge};
 
 const DEFAULT_DATE: &str = "today 1-m";
@@ -287,6 +288,8 @@ pub async fn googletrends(
             continue;
         }
 
+        // 配方自开标签页：成功结果返回后调度延迟关闭（失败路径已立即 close_tab_quietly）
+        schedule_auto_close(bridge, None, &tab_id).await;
         return Ok(shape_result(&data, tab_id, query, &date, geo));
     }
 
@@ -382,6 +385,8 @@ pub async fn googletrends_compare(
             continue;
         }
 
+        // 配方自开标签页：成功结果返回后调度延迟关闭（失败路径已立即 close_tab_quietly）
+        schedule_auto_close(bridge, None, &tab_id).await;
         return Ok(json!({
             "tab_id": tab_id,
             "terms": terms,

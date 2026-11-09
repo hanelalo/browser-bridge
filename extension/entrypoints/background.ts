@@ -26,6 +26,24 @@ const newTabClickCaptures: Map<number, { until: number; owner: string }> = new M
 // 不再占用用户当前窗口/当前激活页，也不会抢窗口焦点。
 let agentWindows: Map<string, number> = new Map();
 const creatingAgentWindows = new Map<string, Promise<number>>();
+
+// bridge 自建的全部窗口（agent 专用窗口 + new_window 显式创建的窗口）。
+// server 用它区分"bridge 管理的窗口"与用户自己的窗口，并在连接时对账。
+const bridgeWindows: Set<number> = new Set();
+
+async function saveBridgeWindows(): Promise<void> {
+  try {
+    await chrome.storage.session.set({ bridgeWindows: Array.from(bridgeWindows) });
+  } catch {
+    // session 存储不可用时退回仅内存记录
+  }
+}
+
+function trackBridgeWindow(windowId: number | null | undefined): void {
+  if (windowId == null) return;
+  bridgeWindows.add(windowId);
+  void saveBridgeWindows();
+}
 let extensionInstanceId = '';
 type ExecutionRecord = {
   state: 'running' | 'unknown';
@@ -98,11 +116,6 @@ function saveExecutionJournal(): Promise<void> {
   return write;
 }
 
-/** 判断是否是 MCP agent 连接（bridge-mcp 使用 mcp- 前缀的稳定身份）；CLI 保持原行为。 */
-function isAgentClient(clientId: string): boolean {
-  return clientId.startsWith('mcp-');
-}
-
 async function saveAutoTabs(): Promise<void> {
   try {
     await chrome.storage.session.set({ autoTabs: Array.from(autoTabs.entries()) });
@@ -156,6 +169,14 @@ async function restoreState(): Promise<void> {
   } catch {
     // ignore
   }
+  try {
+    const got = await chrome.storage.session.get('bridgeWindows');
+    if (Array.isArray(got.bridgeWindows)) {
+      for (const wid of got.bridgeWindows as number[]) bridgeWindows.add(Number(wid));
+    }
+  } catch {
+    // ignore
+  }
   // 清理已失效的窗口记录（例如用户手动关闭了专用窗口）
   await Promise.all(
     Array.from(agentWindows.entries()).map(async ([cid, wid]) => {
@@ -164,6 +185,16 @@ async function restoreState(): Promise<void> {
       } catch {
         agentWindows.delete(cid);
         void saveAgentWindows();
+      }
+    }),
+  );
+  await Promise.all(
+    Array.from(bridgeWindows).map(async (wid) => {
+      try {
+        await chrome.windows.get(wid);
+      } catch {
+        bridgeWindows.delete(wid);
+        void saveBridgeWindows();
       }
     }),
   );
@@ -189,6 +220,7 @@ async function restoreState(): Promise<void> {
       }
     }
     if (changed) void saveAgentWindows();
+    if (bridgeWindows.delete(windowId)) void saveBridgeWindows();
   });
 }
 
@@ -218,6 +250,8 @@ function connect(): void {
     setStatus('connected');
     startPing(socket);
     void closeOffscreen();
+    // 上报现存 bridge 窗口/标签页清单（server 重启后重建资源队列）
+    void pushBridgeInventory(socket).catch(() => {});
   };
 
   socket.onmessage = (event) => {
@@ -338,6 +372,17 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
       send(socket, { id: msg.id, success: true, result: await execute(msg.method, msg.params ?? {}, clientId) });
       return;
     }
+    // server 直发的资源管理指令（延迟关闭、容量逐出）：不带 _window_ids、
+    // 不经 resolve+admit、不占执行容量。带 _window_ids 的是普通客户端指令，走正常准入。
+    const directParams = (msg.params ?? {}) as Record<string, unknown>;
+    if (
+      !Array.isArray(directParams._window_ids)
+      && (msg.method === 'close_tab' || msg.method === 'close_window')
+    ) {
+      const result = await execute(msg.method, directParams, clientId);
+      send(socket, { id: msg.id, success: true, result });
+      return;
+    }
     if (executions.has(msg.id)) return; // An unfinished dispatch is still occupying its window.
     const windows = msg.params?._window_ids;
     if (!Array.isArray(windows) || windows.some((id) => typeof id !== 'number')) {
@@ -426,7 +471,9 @@ async function resolveTarget(
   if (!pageMethods.includes(method)) throw new Error(`unknown method: ${method}`);
   // Target discovery must stay read-only. Ask the server to schedule default
   // window creation under its global limit, then resolve again.
-  if (params.tab_id == null && requestedWindowId(params) == null && isAgentClient(clientId)) {
+  // 所有连接（含 CLI）缺省都走自己的 bridge 专用窗口：不指定 tab/window 且
+  // 专用窗口还不存在时，让 server 在其容量管理下引导创建默认窗口。
+  if (params.tab_id == null && requestedWindowId(params) == null) {
     const known = agentWindows.get(clientId);
     const existing = known == null ? null : await chrome.windows.get(known).catch(() => null);
     if (!existing) return { window_ids: [], params, needs_default_window: true };
@@ -563,22 +610,21 @@ async function runPageOp(
     });
     const r = (result?.result ?? {}) as { __bridge_error?: string; open_url?: string };
     if (r.__bridge_error) throw new Error(r.__bridge_error);
-    // new_tab 锚点：由扩展创建标签页，精确记录并返回新 tab id，便于后续链式操作
+    // new_tab 锚点：由扩展创建标签页，精确记录并返回新 tab id，便于后续链式操作。
+    // 始终开在 bridge 窗口（指定窗口或调用方专用窗口），响应带 window_id 供 server 记账。
     if (typeof r.open_url === 'string' && r.open_url) {
       const targetWindow = requestedWindowId(params);
-      const nt = isAgentClient(clientId) || targetWindow != null
-        ? await chrome.tabs.create({
-            windowId: targetWindow ?? (await ensureAgentWindow(clientId)),
-            url: r.open_url,
-            active: true,
-          })
-        : await chrome.tabs.create({ url: r.open_url });
+      const nt = await chrome.tabs.create({
+        windowId: targetWindow ?? (await ensureAgentWindow(clientId)),
+        url: r.open_url,
+        active: true,
+      });
       if (nt.id != null) {
         autoTabs.set(nt.id, clientId);
         void saveAutoTabs();
       }
       const { open_url: _openUrl, ...rest } = r;
-      return { ...rest, tab_id: nt.id };
+      return { ...rest, tab_id: nt.id, window_id: nt.windowId ?? null };
     }
     return { ...r, tab_id: tab.id };
   } catch (err) {
@@ -780,10 +826,24 @@ async function runScript(params: Record<string, unknown>, clientId = ''): Promis
   }
 }
 
-async function activeTab(): Promise<chrome.tabs.Tab> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) throw new Error('no active tab');
-  return tab;
+/** 连接建立后向 server 上报现存 bridge 资源清单：server 重启后据此重建
+ *  自建窗口/标签页队列，避免把已有 bridge 窗口误判为用户窗口而拒绝服务。 */
+async function pushBridgeInventory(socket: WebSocket): Promise<void> {
+  await stateReady;
+  const windows = Array.from(bridgeWindows);
+  const tabs = (
+    await Promise.all(
+      Array.from(autoTabs.keys()).map(async (id) => {
+        const tab = await chrome.tabs.get(id).catch(() => null);
+        return tab ? { tab_id: id, window_id: tab.windowId ?? null } : null;
+      }),
+    )
+  ).filter((t): t is { tab_id: number; window_id: number | null } => t !== null);
+  send(socket, {
+    id: `inventory-${Date.now()}`,
+    method: '_bridge_inventory',
+    params: { windows, tabs },
+  });
 }
 
 /** 取某个 agent 的专用窗口，不存在则惰性创建（focused:false，不抢 OS 焦点）。 */
@@ -813,6 +873,7 @@ async function ensureAgentWindowOnce(clientId: string): Promise<number> {
     focused: false,
   });
   if (win?.id == null) throw new Error('failed to create agent window');
+  trackBridgeWindow(win.id);
   agentWindows.set(clientId, win.id);
   void saveAgentWindows();
   return win.id;
@@ -847,15 +908,13 @@ async function resolveTab(
     if (active?.id != null) return active;
     return chrome.tabs.create({ windowId: requestedWindow, active: true });
   }
-  if (isAgentClient(clientId)) {
-    // agent 缺省落在自己的专用窗口：用窗口内激活页，没有就新建
-    const windowId = await ensureAgentWindow(clientId);
-    const tabs = await chrome.tabs.query({ windowId });
-    const active = tabs.find((t) => t.active) ?? tabs[0];
-    if (active?.id != null) return active;
-    return chrome.tabs.create({ windowId, active: true });
-  }
-  return activeTab();
+  // 所有连接（含 CLI）缺省都落在自己的 bridge 专用窗口：用窗口内激活页，
+  // 没有就新建。bridge 不触碰用户自己的窗口（server 侧会强制拦截非 bridge 窗口）。
+  const windowId = await ensureAgentWindow(clientId);
+  const tabs = await chrome.tabs.query({ windowId });
+  const active = tabs.find((t) => t.active) ?? tabs[0];
+  if (active?.id != null) return active;
+  return chrome.tabs.create({ windowId, active: true });
 }
 
 function waitForComplete(tabId: number, timeoutMs = 30_000): Promise<void> {
@@ -893,6 +952,8 @@ async function listWindows(): Promise<unknown> {
   const windows = await chrome.windows.getAll({ populate: true });
   return windows.map((win) => ({
     window_id: win.id ?? null,
+    // 窗口来源：true = bridge 自建（专用窗口 / new_window），false = 用户自己打开
+    bridge: win.id != null && bridgeWindows.has(win.id),
     focused: win.focused === true,
     type: win.type ?? null,
     state: win.state ?? null,
@@ -913,7 +974,8 @@ async function newWindow(params: Record<string, unknown>, clientId: string): Pro
     focused: params.focused === true,
   });
   if (win?.id == null) throw new Error('failed to create window');
-  if (isAgentClient(clientId) && !agentWindows.has(clientId)) {
+  trackBridgeWindow(win.id);
+  if (!agentWindows.has(clientId)) {
     agentWindows.set(clientId, win.id);
     void saveAgentWindows();
   }
@@ -1444,22 +1506,26 @@ async function closeAgentWindow(
   return { closed: true, window_id: windowId };
 }
 
-/** 新建标签页（可指定 URL）。 */
+/** 新建标签页（可指定 URL）。始终开在 bridge 窗口：指定窗口或调用方专用窗口。 */
 async function newTab(params: Record<string, unknown>, clientId: string): Promise<unknown> {
   const url = typeof params.url === 'string' && params.url ? params.url : undefined;
   const targetWindow = requestedWindowId(params);
-  const tab = isAgentClient(clientId) || targetWindow != null
-    ? await chrome.tabs.create({
-        windowId: targetWindow ?? (await ensureAgentWindow(clientId)),
-        url,
-        active: true,
-      })
-    : await chrome.tabs.create({ url });
+  const tab = await chrome.tabs.create({
+    windowId: targetWindow ?? (await ensureAgentWindow(clientId)),
+    url,
+    active: true,
+  });
   if (tab.id != null) {
     autoTabs.set(tab.id, clientId);
     void saveAutoTabs();
   }
-  return { tab_id: tab.id, url: tab.url ?? null, title: tab.title ?? null, active: tab.active };
+  return {
+    tab_id: tab.id,
+    window_id: tab.windowId ?? null,
+    url: tab.url ?? null,
+    title: tab.title ?? null,
+    active: tab.active,
+  };
 }
 
 /** 切换到指定标签页并聚焦所在窗口（默认当前激活标签页）。 */

@@ -3,6 +3,7 @@
 
 use serde_json::{json, Value};
 
+use super::schedule_auto_close;
 use crate::transport::{urlencode, Bridge};
 
 // 提取用容器：#rso 的直接子 div，每个即一条搜索结果
@@ -75,6 +76,7 @@ pub async fn googlesearch(
         })
         .collect();
 
+    schedule_auto_close(bridge, tab, &tab_id).await;
     Ok(json!({
         "tab_id": tab_id,
         "results": results,

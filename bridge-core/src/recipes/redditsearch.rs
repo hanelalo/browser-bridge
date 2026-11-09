@@ -3,6 +3,7 @@
 
 use serde_json::{json, Value};
 
+use super::schedule_auto_close;
 use crate::transport::{urlencode, Bridge};
 
 // 结果项两种渲染形态（preview 带正文预览，sdui 只有标题），内部结构一致
@@ -107,6 +108,7 @@ pub async fn redditsearch(
         })
         .collect();
 
+    schedule_auto_close(bridge, tab, &tab_id).await;
     Ok(json!({
         "tab_id": tab_id,
         "results": results,

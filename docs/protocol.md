@@ -20,7 +20,7 @@
 
 server 对所有 client 统一调度：最多同时执行 3 个任务；同一个浏览器窗口同时只能执行 1 个任务。等待窗口空闲的任务不占用全局执行名额，因此一个忙窗口不会阻塞其他空闲窗口。
 
-请求可以带 `window_id` 或 `tab_id`。server 先让扩展解析真实窗口和标签页，再按物理窗口排队。不同 client 指向同一标签页、默认窗口或显式窗口都会使用同一把窗口锁。MCP 省略时沿用专用窗口，CLI 省略时使用当前窗口：
+请求可以带 `window_id` 或 `tab_id`。server 先让扩展解析真实窗口和标签页，再按物理窗口排队。不同 client 指向同一标签页、默认窗口或显式窗口都会使用同一把窗口锁。任何 client 省略窗口时都落在自己的 bridge 专用窗口（不存在则由 server 在容量管理下引导创建），不会触碰用户自己的窗口：
 
 ```json
 { "id": "w1", "method": "list_tabs", "params": { "window_id": 5 } }
@@ -50,7 +50,20 @@ result：`{ window_id, running[], pending[] }`。`running` 是已经占用该窗
 
 `close_auto_tabs` 会固定本次清理涉及的标签页，并同时取得所有涉及窗口的锁；等待期间不会占用部分窗口。`close_agent_window` 同样按真实窗口调度。排队过程中标签页移到其他窗口会报错，不会越过原有许可操作新窗口。
 
-窗口管理方法：`list_windows`、`new_window`、`close_window`。`list_windows` 返回窗口及其标签页；`new_window` 返回 `window_id`，之后可把它传给任意支持窗口路由的工具。
+窗口管理方法：`list_windows`、`new_window`、`close_window`。`list_windows` 返回窗口及其标签页；`new_window` 返回 `window_id`，之后可把它传给任意支持窗口路由的工具。每个窗口结果额外带 `bridge: true/false`，标识该窗口是 bridge 自建（专用窗口 / `new_window`）还是用户自己打开的。
+
+## bridge 自建资源队列与隔离
+
+server 为 bridge 自建的窗口和标签页维护资源队列（只统计经由 bridge 创建的资源，不含用户自己的窗口）：
+
+- **窗口队列**：容量 5，记录 `window_id` 与最近一次使用时间（任何指令解析命中该窗口即刷新）。来源包括 agent/CLI 专用窗口、`new_window`。
+- **标签页队列**：容量 20，记录 `tab_id`、所属 `window_id` 与最近一次使用时间。来源包括 `new_tab`、`new_window` 的首个标签页、默认窗口引导的初始标签页、`click --new-tab`。
+- **逐出**：`new_tab` / `new_window` / `click --new-tab`（以及默认窗口引导）放行前检查容量——tab 队列满 20 时先关闭最旧的 5 个标签页；窗口队列满 5 时（新建窗口场景）先关闭最旧的 3 个窗口。逐出是发射后不管的直发 `close_tab` / `close_window`，不占用任务调度额度；严格按最旧逐出，不做"在用保护"，正被任务使用的资源被逐出时该任务会收到失败。
+- **级联**：标签页被关闭后其所在窗口可能随之关闭（Chrome 行为）。扩展通过 `_window_removed` 通知 server，server 把该窗口连同其标签页记录一并移除。
+- **隔离强制**：除 `new_window`、`close_auto_tabs`、`close_agent_window` 外，任何指令解析命中的窗口都必须是 bridge 自建窗口，否则报错 `bridge may only operate on windows it created...`。这意味着 bridge 不能读写或关闭用户自己的窗口与标签页；指定 `tab_id` 时其所在窗口也必须是 bridge 自建的。
+- **对账**：扩展连接建立后发送内部消息 `_bridge_inventory`（`{ windows: [...], tabs: [{ tab_id, window_id }] }`），server 据此重建资源队列（server 重启后队列不丢对已有 bridge 窗口的识别）。客户端不能调用该内部方法。
+
+`new_tab` 与 `click --new-tab` 的响应带 `window_id`（新标签页所在窗口），供 server 记账；`close_tab` / `close_window` / `close_auto_tabs` 成功后 server 回收对应记录。
 
 ## 请求
 
@@ -140,6 +153,24 @@ result：
 { "closed": true, "tab_id": 7 }
 ```
 
+### schedule_tab_close
+
+调度延迟关闭：`delay_ms` 毫秒后由 server 主动对该标签页执行一次 `close_tab`。配方类任务在结果返回后用它延迟关闭自己打开的标签页（随机 10~20 秒），调用方可立即拿到结果退出，定时不占用任务租约与窗口锁，也不绑定调用方连接生命周期。
+
+params：
+
+```json
+{ "tab_id": 7, "delay_ms": 15000 }
+```
+
+`tab_id` 必填；`delay_ms` 可选（缺省 15000，服务端 clamp 到 1000~120000）。server 立即应答：
+
+```json
+{ "scheduled": true, "tab_id": 7, "delay_ms": 15000 }
+```
+
+到期后 server 直接向扩展发送 `close_tab`（发射后不管，不经过任务调度；标签页已被手动关闭时扩展返回错误并被忽略）。条目只存内存，server 重启即丢失（标签页留着，可用 `close_auto_tabs` 兜底清理）；待关闭条目上限 1024，超限丢弃最旧。
+
 ### close_auto_tabs
 
 关闭 bridge 自动打开（`new_tab` / `click --new-tab` 创建）的标签页，不碰手动开的标签页。
@@ -195,7 +226,7 @@ params：
 result：
 
 ```json
-{ "tab_id": 8, "url": "https://example.com", "title": "Example", "active": true }
+{ "tab_id": 8, "window_id": 5, "url": "https://example.com", "title": "Example", "active": true }
 ```
 
 ### activate_tab

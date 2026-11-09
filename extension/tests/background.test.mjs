@@ -2,10 +2,40 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { background } from './helpers/background.mjs';
 
-test('existing agent window is used repeatedly, never the user active window', async () => {
+test('every client falls back to its own bridge window, never the user active window', async () => {
   const bg = await background({ agentWindows: [['mcp-a', 5]] });
   for (let i = 0; i < 3; i++) assert.equal((await bg.resolveTab(undefined, 'mcp-a')).id, 10);
-  assert.equal((await bg.resolveTab(undefined, 'cli')).id, 20);
+  // CLI 同样落到自己的专用窗口（不存在则新建，mock 里新建窗口 id=100、初始 tab id=101），
+  // 绝不使用用户当前窗口的激活页（tab 20）
+  const first = await bg.resolveTab(undefined, 'cli');
+  const second = await bg.resolveTab(undefined, 'cli');
+  assert.equal(first.id, 101);
+  assert.equal(second.id, first.id);
+  assert.equal(bg.creations(), 1);
+});
+
+test('server-fired close_tab without a permit executes directly', async () => {
+  const bg = await background({ autoTabs: [[10, 'cli']] });
+  const replies = [];
+  const socket = { readyState: 1, send: (s) => replies.push(JSON.parse(s)) };
+  // 无 _window_ids 的直发 close_tab（延迟关闭 / 容量逐出）：豁免准入直接执行
+  await bg.handleMessage(socket, JSON.stringify({ id: 'd1', method: 'close_tab', params: { tab_id: 10 }, client_id: '' }));
+  assert.equal(replies[0].success, true);
+  assert.equal(replies[0].result.closed, true);
+  assert.equal(bg.tabs.has(10), false);
+});
+
+test('list_windows marks bridge-created windows', async () => {
+  const bg = await background();
+  const replies = [];
+  const socket = { readyState: 1, send: (s) => replies.push(JSON.parse(s)) };
+  await bg.handleMessage(socket, JSON.stringify({ id: 'nw', method: 'new_window', params: { _window_ids: [] }, client_id: 'cli' }));
+  await bg.handleMessage(socket, JSON.stringify({ id: 'lw', method: 'list_windows', params: {} }));
+  const lw = replies.find((r) => r.id === 'lw');
+  assert.ok(lw.success);
+  const flags = lw.result.map((w) => w.bridge).sort();
+  // 预置的 5/9 是用户窗口，new_window 新建的是 bridge 窗口
+  assert.deepEqual(flags, [false, false, true]);
 });
 
 test('parallel first use creates exactly one default window', async () => {

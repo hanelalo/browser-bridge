@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use super::schedule_auto_close;
 use crate::transport::{urlencode, Bridge};
 
 const DEFAULT_DATE: &str = "today 1-m";
@@ -183,6 +184,8 @@ pub async fn oldgoogletrends(
         });
     match result {
         Ok(mut data) => {
+            // 配方自开标签页：成功结果返回后调度延迟关闭（失败路径已立即 close_tab）
+            schedule_auto_close(bridge, None, &tab_id).await;
             data["tab_id"] = tab_id;
             data["query"] = json!(query);
             data["date"] = json!(date);
@@ -259,6 +262,8 @@ pub async fn oldgoogletrends_compare(
         });
     match result {
         Ok(mut data) => {
+            // 配方自开标签页：成功结果返回后调度延迟关闭（失败路径已立即 close_tab）
+            schedule_auto_close(bridge, None, &tab_id).await;
             data["tab_id"] = tab_id;
             data["terms"] = json!(terms);
             data["date"] = json!(date);
@@ -318,7 +323,9 @@ mod tests {
             explore_url(&["coffee", "black tea"].join(","), "today 1-m", &normalize_geo("worldwide")),
             "https://trends.google.com/trends/explore?q=coffee%2Cblack+tea&date=today+1-m&legacy&hl=zh-CN"
         );
-        assert!(explore_url(&["a", "b"].join(","), "now 7-d", &normalize_geo("jp"))
-            .ends_with("q=a%2Cb&date=now+7-d&legacy&hl=zh-CN&geo=JP"));
+        assert!(
+            explore_url(&["a", "b"].join(","), "now 7-d", &normalize_geo("jp"))
+                .ends_with("q=a%2Cb&date=now+7-d&legacy&hl=zh-CN&geo=JP")
+        );
     }
 }

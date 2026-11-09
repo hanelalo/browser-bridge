@@ -8,6 +8,7 @@
 
 use serde_json::{json, Value};
 
+use super::schedule_auto_close;
 use crate::transport::Bridge;
 
 /// 把用户输入（11 位视频 ID 或各种 watch / shorts / youtu.be 链接）归一化成 watch URL。
@@ -388,5 +389,6 @@ pub async fn youtubeinfo(
         ));
     }
     let video = res.get("video").cloned().unwrap_or(Value::Null);
+    schedule_auto_close(bridge, tab, &tab_id).await;
     Ok(json!({ "tab_id": tab_id, "video": video }))
 }

@@ -10,6 +10,7 @@
 
 use serde_json::{json, Value};
 
+use super::schedule_auto_close;
 use crate::transport::Bridge;
 
 /// 路径段编码：字母数字及 `-_.~@` 原样，其余按 UTF-8 字节转 %XX
@@ -401,6 +402,7 @@ pub async fn youtuberinfo(
         }));
     }
 
+    schedule_auto_close(bridge, tab, &tab_id).await;
     Ok(json!({
         "tab_id": tab_id,
         "channel": channel_obj,

@@ -55,6 +55,21 @@ impl Fixture {
             },
         });
     }
+    /// 模拟扩展连接时上报 `_bridge_inventory`：强制拦截只放行 bridge 自建窗口。
+    fn track(&mut self, window: i64) {
+        self.hub.event(HubMsg::Forward {
+            conn_id: self.hub.extension.expect("extension connected"),
+            msg: WireMessage {
+                id: None,
+                method: Some("_bridge_inventory".into()),
+                params: Some(json!({
+                    "windows": [window],
+                    "tabs": [{"tab_id": window * 10, "window_id": window}],
+                })),
+                ..WireMessage::default()
+            },
+        });
+    }
     fn resolve(&mut self, window: i64) -> WireMessage {
         let resolve = recv(&mut self.browser);
         assert_eq!(resolve.method.as_deref(), Some("_resolve_target"));
@@ -63,6 +78,7 @@ impl Fixture {
         if params["tab_id"].is_null() {
             params["tab_id"] = json!(window * 10);
         }
+        self.track(window);
         self.respond(&resolve, json!({"window_ids":[window],"params":params}));
         resolve
     }
@@ -526,4 +542,223 @@ fn window_task_snapshot_splits_running_and_pending_for_one_window() {
     let empty = f.window_tasks(99);
     assert!(empty["running"].as_array().unwrap().is_empty());
     assert!(empty["pending"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn scheduled_tab_close_fires_after_delay_without_task_scheduling() {
+    let mut f = Fixture::new();
+    f.request(
+        2,
+        "s1",
+        "schedule_tab_close",
+        json!({"tab_id": 42, "delay_ms": 1000}),
+    );
+    let reply = recv(&mut f.a);
+    assert_eq!(reply.success, Some(true));
+    assert_eq!(reply.result.as_ref().unwrap()["scheduled"], json!(true));
+    assert_eq!(reply.result.as_ref().unwrap()["tab_id"], json!(42));
+    assert_eq!(reply.result.as_ref().unwrap()["delay_ms"], json!(1000));
+
+    // 未到期：不向扩展发送任何指令
+    f.hub.tick();
+    assert!(f.browser.try_recv().is_err());
+
+    // 到期后：直接向扩展发 close_tab（发射后不管，不走 _resolve_target / 任务队列）
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    f.hub.tick();
+    let close = recv(&mut f.browser);
+    assert_eq!(close.method.as_deref(), Some("close_tab"));
+    assert_eq!(close.params.as_ref().unwrap()["tab_id"], json!(42));
+}
+
+#[tokio::test]
+async fn scheduled_tab_close_waits_for_extension_reconnect() {
+    let mut f = Fixture::new();
+    f.request(2, "s1", "schedule_tab_close", json!({"tab_id": 7}));
+    let reply = recv(&mut f.a);
+    assert_eq!(reply.result.as_ref().unwrap()["delay_ms"], json!(15000));
+    // 扩展离线：到期条目保留，等重连后再执行
+    let ext = f.hub.extension.take();
+    f.hub.tick();
+    assert!(f.browser.try_recv().is_err());
+    f.hub.extension = ext;
+    // 把到期时刻拨到过去：直接改写队列条目模拟时间流逝
+    let mut entries: VecDeque<(Instant, i64)> = std::mem::take(&mut f.hub.pending_closes);
+    for (at, tab) in entries.iter_mut() {
+        *at = Instant::now() - Duration::from_millis(1);
+        assert_eq!(*tab, 7);
+    }
+    f.hub.pending_closes = entries;
+    f.hub.tick();
+    let close = recv(&mut f.browser);
+    assert_eq!(close.method.as_deref(), Some("close_tab"));
+    assert_eq!(close.params.as_ref().unwrap()["tab_id"], json!(7));
+}
+
+#[test]
+fn requests_targeting_non_bridge_windows_are_rejected() {
+    let mut f = Fixture::new();
+    // 未先对账登记窗口 7：解析命中用户窗口 → 强制拦截
+    f.request(2, "r1", "run_script", json!({}));
+    let resolve = recv(&mut f.browser);
+    assert_eq!(resolve.method.as_deref(), Some("_resolve_target"));
+    let mut params = resolve.params.as_ref().unwrap()["params"].clone();
+    params["window_id"] = json!(7);
+    if params["tab_id"].is_null() {
+        params["tab_id"] = json!(70);
+    }
+    f.respond(&resolve, json!({"window_ids":[7],"params":params}));
+    let reply = recv(&mut f.a);
+    assert_eq!(reply.success, Some(false));
+    assert!(reply
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("bridge may only operate on windows it created"));
+    // 对账登记后同一窗口放行
+    f.track(7);
+    f.request(2, "r2", "run_script", json!({}));
+    let resolve = recv(&mut f.browser);
+    f.respond(
+        &resolve,
+        json!({"window_ids":[7],"params":{"tab_id":70,"window_id":7}}),
+    );
+    let admitted = recv(&mut f.browser);
+    assert_eq!(admitted.method.as_deref(), Some("run_script"));
+}
+
+#[test]
+fn new_tab_admission_evicts_five_oldest_tracked_tabs() {
+    let mut f = Fixture::new();
+    // 登记 20 个自建 tab（窗口 9），last_used 随 tab_id 递增变旧：115..=119 最旧
+    let tabs: Vec<Value> = (100..120)
+        .map(|t| json!({"tab_id": t, "window_id": 9}))
+        .collect();
+    f.hub.event(HubMsg::Forward {
+        conn_id: 1,
+        msg: WireMessage {
+            id: None,
+            method: Some("_bridge_inventory".into()),
+            params: Some(json!({"windows": [9], "tabs": tabs})),
+            ..WireMessage::default()
+        },
+    });
+    let base = Instant::now();
+    for (&tab_id, entry) in f.hub.tracked_tabs.iter_mut() {
+        entry.1 = base - Duration::from_millis((tab_id - 100) as u64);
+    }
+
+    f.request(2, "nt", "new_tab", json!({}));
+    // 放行前先直发 5 个 close_tab（发射后不管，不带 _window_ids）
+    let mut evicted = Vec::new();
+    for _ in 0..5 {
+        let close = recv(&mut f.browser);
+        assert_eq!(close.method.as_deref(), Some("close_tab"));
+        assert!(close.params.as_ref().unwrap()["_window_ids"].is_null());
+        evicted.push(close.params.as_ref().unwrap()["tab_id"].as_i64().unwrap());
+    }
+    evicted.sort();
+    assert_eq!(evicted, vec![115, 116, 117, 118, 119]);
+    assert_eq!(f.hub.tracked_tabs.len(), 15);
+    // 之后 new_tab 正常解析放行
+    let resolve = recv(&mut f.browser);
+    assert_eq!(resolve.method.as_deref(), Some("_resolve_target"));
+    f.respond(
+        &resolve,
+        json!({"window_ids":[9],"params":{"tab_id":90,"window_id":9}}),
+    );
+    let admitted = recv(&mut f.browser);
+    assert_eq!(admitted.method.as_deref(), Some("new_tab"));
+}
+
+#[test]
+fn new_window_admission_evicts_three_oldest_tracked_windows() {
+    let mut f = Fixture::new();
+    let windows: Vec<i64> = (0..5).map(|i| 50 + i).collect();
+    let tabs: Vec<Value> = windows
+        .iter()
+        .map(|w| json!({"tab_id": w * 10, "window_id": w}))
+        .collect();
+    f.hub.event(HubMsg::Forward {
+        conn_id: 1,
+        msg: WireMessage {
+            id: None,
+            method: Some("_bridge_inventory".into()),
+            params: Some(json!({"windows": windows, "tabs": tabs})),
+            ..WireMessage::default()
+        },
+    });
+    let base = Instant::now();
+    for (&window_id, last_used) in f.hub.tracked_windows.iter_mut() {
+        // 50 最旧、54 最新
+        *last_used = base - Duration::from_millis((60 - window_id) as u64);
+    }
+
+    f.request(2, "nw", "new_window", json!({}));
+    // 窗口队列满 5：先直发 3 个 close_window，逐出最旧的 50/51/52
+    let mut evicted = Vec::new();
+    for _ in 0..3 {
+        let close = recv(&mut f.browser);
+        assert_eq!(close.method.as_deref(), Some("close_window"));
+        evicted.push(
+            close.params.as_ref().unwrap()["window_id"]
+                .as_i64()
+                .unwrap(),
+        );
+    }
+    evicted.sort();
+    assert_eq!(evicted, vec![50, 51, 52]);
+    assert_eq!(f.hub.tracked_windows.len(), 2);
+    // 被逐出窗口的标签页记录级联移除
+    assert!(!f.hub.tracked_tabs.contains_key(&500));
+    assert!(!f.hub.tracked_tabs.contains_key(&520));
+    assert!(f.hub.tracked_tabs.contains_key(&530));
+    // 之后 new_window 正常解析放行（new_window 解析豁免窗口范围，直接执行）
+    let resolve = recv(&mut f.browser);
+    assert_eq!(resolve.method.as_deref(), Some("_resolve_target"));
+    f.respond(&resolve, json!({"window_ids":[],"params":{}}));
+    let admitted = recv(&mut f.browser);
+    assert_eq!(admitted.method.as_deref(), Some("new_window"));
+    // 执行成功后新窗口 60 登记为 bridge 自建
+    f.respond(
+        &admitted,
+        json!({"window_id":60,"tab_id":600,"focused":false}),
+    );
+    assert!(f.hub.tracked_windows.contains_key(&60));
+    assert!(f.hub.tracked_tabs.contains_key(&600));
+}
+
+#[test]
+fn window_removed_notification_cascades_tab_records() {
+    let mut f = Fixture::new();
+    f.hub.event(HubMsg::Forward {
+        conn_id: 1,
+        msg: WireMessage {
+            id: None,
+            method: Some("_bridge_inventory".into()),
+            params: Some(json!({
+                "windows": [9, 8],
+                "tabs": [
+                    {"tab_id": 60, "window_id": 9},
+                    {"tab_id": 61, "window_id": 9},
+                    {"tab_id": 80, "window_id": 8},
+                ],
+            })),
+            ..WireMessage::default()
+        },
+    });
+    f.hub.event(HubMsg::Forward {
+        conn_id: 1,
+        msg: WireMessage {
+            id: None,
+            method: Some("_window_removed".into()),
+            params: Some(json!({"window_id": 9})),
+            ..WireMessage::default()
+        },
+    });
+    assert!(!f.hub.tracked_windows.contains_key(&9));
+    assert!(f.hub.tracked_windows.contains_key(&8));
+    assert!(!f.hub.tracked_tabs.contains_key(&60));
+    assert!(!f.hub.tracked_tabs.contains_key(&61));
+    assert!(f.hub.tracked_tabs.contains_key(&80));
 }

@@ -5,6 +5,7 @@
 
 use serde_json::{json, Value};
 
+use super::schedule_auto_close;
 use crate::target;
 use crate::transport::Bridge;
 
@@ -288,6 +289,7 @@ pub async fn querydomains(
         })
         .collect();
 
+    schedule_auto_close(bridge, tab, &tab_id).await;
     Ok(json!({
         "tab_id": tab_id,
         "query": query,

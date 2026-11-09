@@ -10,6 +10,7 @@
 
 use serde_json::{json, Value};
 
+use super::schedule_auto_close;
 use crate::transport::{urlencode, Bridge};
 
 /// 点击定位用：结果卡片上的标题链接，按结果序号定位
@@ -237,6 +238,7 @@ pub async fn youtubesearch(
         .cloned()
         .unwrap_or_default();
     let results = build_results(items, max);
+    schedule_auto_close(bridge, tab, &tab_id).await;
     Ok(json!({
         "tab_id": tab_id,
         "results": results,

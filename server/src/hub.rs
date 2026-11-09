@@ -10,6 +10,12 @@ use tokio_tungstenite::tungstenite::Message;
 const MAX_RUNNING: usize = 3;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const LEASE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// bridge 自建 tab 的容量上限；打满时新开 tab/窗口前逐出最旧的 5 个
+const MAX_TRACKED_TABS: usize = 20;
+const TAB_EVICT_COUNT: usize = 5;
+/// bridge 自建窗口的容量上限；打满时新建窗口前逐出最旧的 3 个
+const MAX_TRACKED_WINDOWS: usize = 5;
+const WINDOW_EVICT_COUNT: usize = 3;
 
 pub(super) enum HubMsg {
     Register {
@@ -83,6 +89,15 @@ struct Hub {
     tasks: HashMap<String, Task>,
     order: VecDeque<String>,
     finished: VecDeque<String>,
+    /// 延迟关闭队列：(到期时刻, tab_id)。配方任务结束后由 server 在 10~20 秒后
+    /// 关闭其自动打开的标签页；在 tick 里触发，不走任务调度（不占窗口锁与并发名额）。
+    pending_closes: VecDeque<(Instant, i64)>,
+    /// bridge 自建的标签页：tab_id -> (所属窗口, 最近一次被使用时刻)。
+    /// 来源包括 new_tab / new_window 首个 tab / agent 默认窗口 / click --new-tab。
+    tracked_tabs: HashMap<i64, (Option<i64>, Instant)>,
+    /// bridge 自建的窗口：window_id -> 最近一次被使用时刻。同时是
+    /// "bridge 只能操作自建窗口"强制拦截的判定依据。
+    tracked_windows: HashMap<i64, Instant>,
     sequence: u64,
     epoch: u128,
 }
@@ -100,6 +115,9 @@ impl Hub {
             tasks: HashMap::new(),
             order: VecDeque::new(),
             finished: VecDeque::new(),
+            pending_closes: VecDeque::new(),
+            tracked_tabs: HashMap::new(),
+            tracked_windows: HashMap::new(),
             sequence: 0,
             epoch: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -404,6 +422,36 @@ impl Hub {
             }
             return;
         }
+        // 延迟关闭调度：只登记定时器并立即应答，真正关闭在 tick 里触发。
+        // 不依赖扩展在线（离线时条目等到重连后再执行），也不绑定调用方连接的生命周期。
+        if method == "schedule_tab_close" {
+            let params = msg.params.clone().unwrap_or(Value::Null);
+            let Some(tab_id) = params["tab_id"].as_i64() else {
+                self.send(
+                    conn,
+                    WireMessage::err(&original, "tab_id (number) is required"),
+                );
+                return;
+            };
+            let delay_ms = params["delay_ms"]
+                .as_u64()
+                .unwrap_or(15_000)
+                .clamp(1_000, 120_000);
+            // 上限保护：异常调用方不能无限堆积待关闭条目
+            if self.pending_closes.len() >= 1024 {
+                self.pending_closes.pop_front();
+            }
+            self.pending_closes
+                .push_back((Instant::now() + Duration::from_millis(delay_ms), tab_id));
+            self.send(
+                conn,
+                WireMessage::ok(
+                    &original,
+                    json!({"scheduled":true,"tab_id":tab_id,"delay_ms":delay_ms}),
+                ),
+            );
+            return;
+        }
         let Some(ext) = self.extension else {
             self.send(conn, WireMessage::err(&original, "no extension connected"));
             return;
@@ -516,6 +564,20 @@ impl Hub {
                 }
             }
         }
+        // 资源容量管理：新开 tab / 窗口前先看 bridge 的 tab/window 队列是否打满，
+        // 打满则先逐出最旧的若干条目（关闭指令发射后不管，不阻塞本次创建）。
+        let creates_window = method == "new_window";
+        if creates_window
+            || method == "new_tab"
+            || (method == "click"
+                && request
+                    .msg
+                    .params
+                    .as_ref()
+                    .is_some_and(|p| p["new_tab"].as_bool() == Some(true)))
+        {
+            self.evict_before_create(creates_window);
+        }
         self.resolve(request);
     }
     fn resolve(&mut self, mut request: Request) {
@@ -548,6 +610,12 @@ impl Hub {
             self.reply_window_tasks(&msg);
             return;
         }
+        if msg.method.as_deref() == Some("_bridge_inventory") {
+            if let Some(params) = msg.params.as_ref() {
+                self.reconcile_inventory(params);
+            }
+            return;
+        }
         if msg.method.as_deref() == Some("_window_removed") {
             if let Some(window) = msg.params.as_ref().and_then(|p| p["window_id"].as_i64()) {
                 let ids: Vec<_> = self
@@ -570,6 +638,9 @@ impl Hub {
                 for key in keys {
                     self.close_task(&key, "target window was closed");
                 }
+                // 级联清理：窗口没了，bridge 记录里的窗口与其标签页一并移除
+                //（覆盖逐出连带的窗口自关、用户手动关闭 bridge 窗口等场景）
+                self.remove_tracked_window(window);
             }
             return;
         }
@@ -675,6 +746,10 @@ impl Hub {
                 return;
             }
             request.bootstrap = result["needs_default_window"] == true;
+            // 默认窗口引导即将新建 window+tab：放行前先做容量逐出
+            if request.bootstrap {
+                self.evict_before_create(true);
+            }
             let method = request.msg.method.as_deref().unwrap_or("");
             if windows.is_empty()
                 && !request.bootstrap
@@ -690,6 +765,44 @@ impl Hub {
                 return;
             }
             request.msg.params = Some(result["params"].clone());
+            // 隔离强制：bridge 只能操作自己创建的窗口。引导流程（默认窗口尚未
+            // 落地登记）与本身即创建/清理入口的指令豁免；list_tabs/list_windows
+            // 走 inventory 路径，到不了这里。
+            let exempt = (request.bootstrap && windows.is_empty())
+                || matches!(
+                    method,
+                    "new_window" | "close_auto_tabs" | "close_agent_window"
+                );
+            if !exempt
+                && windows
+                    .iter()
+                    .any(|w| !self.tracked_windows.contains_key(w))
+            {
+                self.reply(
+                    &mut request,
+                    Err(
+                        "bridge may only operate on windows it created; omit window_id to use a bridge window, or create one with new_window".into(),
+                    ),
+                );
+                return;
+            }
+            // 命中自建窗口/标签页：刷新最近使用时间（逐出按此排序）
+            let now = Instant::now();
+            for w in &windows {
+                if let Some(last_used) = self.tracked_windows.get_mut(w) {
+                    *last_used = now;
+                }
+            }
+            if let Some(tab_id) = request
+                .msg
+                .params
+                .as_ref()
+                .and_then(|p| p["tab_id"].as_i64())
+            {
+                if let Some(entry) = self.tracked_tabs.get_mut(&tab_id) {
+                    entry.1 = now;
+                }
+            }
             let key = request.task_key();
             if self.finished.contains(&key) {
                 self.reply(&mut request, Err("task already finished".into()));
@@ -752,7 +865,16 @@ impl Hub {
             let closing = self.tasks.get(&key).is_none_or(|task| task.closing);
             self.remove_task(&key);
             match result {
-                Ok(_) if !closing && !request.replied && request.deadline > Instant::now() => {
+                Ok(value) if !closing && !request.replied && request.deadline > Instant::now() => {
+                    // 默认窗口落地：登记 bridge 自建窗口与其初始标签页，
+                    // 后续对该窗口的强制拦截放行依赖这条记录
+                    if let Some(w) = value["window_id"].as_i64() {
+                        let now = Instant::now();
+                        self.tracked_windows.insert(w, now);
+                        if let Some(t) = value["tab_id"].as_i64() {
+                            self.tracked_tabs.insert(t, (Some(w), now));
+                        }
+                    }
                     request.bootstrap = false;
                     request.wire = self.id("request");
                     self.resolve(request);
@@ -774,6 +896,61 @@ impl Hub {
                 }
             }
         }
+        // bridge 自建资源登记/回收：创建类指令成功后登记，关闭类指令成功后回收。
+        // 延迟关闭/逐出等 server 直发的 close 不经过这里（发射后不管）。
+        let method = request.msg.method.as_deref().unwrap_or("").to_string();
+        if let Ok(value) = &result {
+            match method.as_str() {
+                "new_window" => {
+                    if let Some(w) = value["window_id"].as_i64() {
+                        let now = Instant::now();
+                        self.tracked_windows.insert(w, now);
+                        if let Some(t) = value["tab_id"].as_i64() {
+                            self.tracked_tabs.insert(t, (Some(w), now));
+                        }
+                    }
+                }
+                "new_tab" => {
+                    if let Some(t) = value["tab_id"].as_i64() {
+                        let w = value["window_id"].as_i64().or_else(|| {
+                            request
+                                .msg
+                                .params
+                                .as_ref()
+                                .and_then(|p| p["window_id"].as_i64())
+                        });
+                        self.tracked_tabs.insert(t, (w, Instant::now()));
+                    }
+                }
+                // click/click_at 的 --new-tab 流程由扩展代开标签页，响应带
+                // window_id 表示本次新开了 tab（普通 click 响应无 window_id 字段）
+                "click" | "click_at" => {
+                    if let (Some(t), Some(w)) =
+                        (value["tab_id"].as_i64(), value["window_id"].as_i64())
+                    {
+                        self.tracked_tabs.insert(t, (Some(w), Instant::now()));
+                    }
+                }
+                "close_tab" if value["closed"].as_bool() == Some(true) => {
+                    if let Some(t) = value["tab_id"].as_i64() {
+                        self.tracked_tabs.remove(&t);
+                    }
+                }
+                "close_window" if value["closed"].as_bool() == Some(true) => {
+                    if let Some(w) = value["window_id"].as_i64() {
+                        self.remove_tracked_window(w);
+                    }
+                }
+                "close_auto_tabs" => {
+                    if let Some(closed) = value["closed"].as_array() {
+                        for tab_id in closed.iter().filter_map(Value::as_i64) {
+                            self.tracked_tabs.remove(&tab_id);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         self.reply(&mut request, result);
         if self
             .tasks
@@ -785,6 +962,23 @@ impl Hub {
     }
     fn tick(&mut self) {
         let now = Instant::now();
+        // 到期的延迟关闭：直接发给扩展执行。发射后不管——tab 已被手动关闭时
+        // 扩展会返回错误，响应 id 不匹配任何在途请求，complete() 会自然忽略。
+        if !self.pending_closes.is_empty() && self.sync_id.is_none() && self.extension.is_some() {
+            let mut due = VecDeque::new();
+            let mut rest = VecDeque::new();
+            while let Some(entry) = self.pending_closes.pop_front() {
+                if entry.0 <= now {
+                    due.push_back(entry);
+                } else {
+                    rest.push_back(entry);
+                }
+            }
+            self.pending_closes = rest;
+            for (_, tab_id) in due {
+                self.send_close_tab(tab_id);
+            }
+        }
         let ids: Vec<_> = self
             .resolutions
             .iter()
@@ -972,6 +1166,114 @@ impl Hub {
             outgoing.params.as_mut().unwrap()["_window_ids"] = json!(task.windows);
             self.executing.insert(request.wire.clone(), (key, request));
             self.send(ext, outgoing);
+        }
+    }
+
+    /// 向扩展发射后不管地关闭一个标签页（延迟关闭与逐出共用）。
+    /// 扩展对直发的 close_tab 豁免 `_window_ids` 准入检查；标签页已不存在时
+    /// 扩展返回错误，响应 id 不匹配任何在途请求，complete() 会自然忽略。
+    fn send_close_tab(&mut self, tab_id: i64) {
+        let Some(ext) = self.extension else {
+            return;
+        };
+        let wire = self.id("close");
+        self.send(
+            ext,
+            WireMessage {
+                id: Some(wire),
+                method: Some("close_tab".into()),
+                params: Some(json!({ "tab_id": tab_id })),
+                ..WireMessage::default()
+            },
+        );
+    }
+
+    /// 向扩展发射后不管地关闭一个窗口（窗口逐出用）。
+    fn send_close_window(&mut self, window_id: i64) {
+        let Some(ext) = self.extension else {
+            return;
+        };
+        let wire = self.id("close");
+        self.send(
+            ext,
+            WireMessage {
+                id: Some(wire),
+                method: Some("close_window".into()),
+                params: Some(json!({ "window_id": window_id })),
+                ..WireMessage::default()
+            },
+        );
+    }
+
+    /// 移除一个 bridge 窗口的全部记录；窗口内标签页记录级联移除
+    ///（窗口关闭时 Chrome 会连带关闭其中所有标签页）。
+    fn remove_tracked_window(&mut self, window_id: i64) {
+        self.tracked_windows.remove(&window_id);
+        self.tracked_tabs.retain(|_, (w, _)| *w != Some(window_id));
+    }
+
+    /// tab 队列打满时，逐出最近使用时间最旧的 TAB_EVICT_COUNT 个。
+    /// 严格按最旧逐出，不做"在用保护"；正在使用被逐出 tab 的任务会收到失败。
+    fn evict_tabs_if_full(&mut self) {
+        if self.tracked_tabs.len() < MAX_TRACKED_TABS {
+            return;
+        }
+        let mut oldest: Vec<(Instant, i64)> = self
+            .tracked_tabs
+            .iter()
+            .map(|(tab_id, (_, last_used))| (*last_used, *tab_id))
+            .collect();
+        oldest.sort_by_key(|(last_used, _)| *last_used);
+        oldest.truncate(TAB_EVICT_COUNT);
+        for (_, tab_id) in oldest {
+            self.tracked_tabs.remove(&tab_id);
+            self.send_close_tab(tab_id);
+        }
+    }
+
+    /// 窗口队列打满时，逐出最近使用时间最旧的 WINDOW_EVICT_COUNT 个。
+    fn evict_windows_if_full(&mut self) {
+        if self.tracked_windows.len() < MAX_TRACKED_WINDOWS {
+            return;
+        }
+        let mut oldest: Vec<(Instant, i64)> = self
+            .tracked_windows
+            .iter()
+            .map(|(window_id, last_used)| (*last_used, *window_id))
+            .collect();
+        oldest.sort_by_key(|(last_used, _)| *last_used);
+        oldest.truncate(WINDOW_EVICT_COUNT);
+        for (_, window_id) in oldest {
+            self.remove_tracked_window(window_id);
+            self.send_close_window(window_id);
+        }
+    }
+
+    /// 扩展连接时上报现存 bridge 资源清单：server 重启后据此重建队列，
+    /// 避免把已存在的 agent 窗口误判为用户窗口而拒绝服务。
+    fn reconcile_inventory(&mut self, params: &Value) {
+        let now = Instant::now();
+        if let Some(windows) = params["windows"].as_array() {
+            for window_id in windows.iter().filter_map(Value::as_i64) {
+                self.tracked_windows.insert(window_id, now);
+            }
+        }
+        if let Some(tabs) = params["tabs"].as_array() {
+            for tab in tabs {
+                if let Some(tab_id) = tab["tab_id"].as_i64() {
+                    self.tracked_tabs
+                        .insert(tab_id, (tab["window_id"].as_i64(), now));
+                }
+            }
+        }
+    }
+
+    /// 创建入口（new_tab / new_window / click --new-tab / 默认窗口引导）在放行前
+    /// 检查容量并逐出。逐出的关闭指令发射后不管，不阻塞本次创建。
+    fn evict_before_create(&mut self, creates_window: bool) {
+        self.evict_tabs_if_full();
+        if creates_window {
+            self.evict_windows_if_full();
         }
     }
 }
