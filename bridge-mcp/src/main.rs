@@ -6,8 +6,8 @@ use rmcp::ServiceExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server = std::env::var("BRIDGE_SERVER")
-        .unwrap_or_else(|_| bridge_mcp::DEFAULT_SERVER.to_string());
+    let server =
+        std::env::var("BRIDGE_SERVER").unwrap_or_else(|_| bridge_mcp::DEFAULT_SERVER.to_string());
     // 每个 MCP 进程一个稳定身份（多 agent 共享浏览器时用于标签页归属隔离）
     let client_id = BridgeMcp::new_client_id("mcp");
     let mcp = BridgeMcp::connect(&server, &client_id)

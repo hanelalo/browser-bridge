@@ -1638,4 +1638,3 @@ impl rmcp::ServerHandler for BridgeMcp {
         ])
     }
 }
-

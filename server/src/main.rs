@@ -197,9 +197,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ws_url = format!("ws://127.0.0.1:{port}");
                 tokio::spawn(async move { mcp_http::serve(http_addr, ws_url).await });
             }
-            Err(error) => eprintln!(
-                "invalid BRIDGE_HTTP_BIND/BRIDGE_HTTP_PORT: {error}; HTTP MCP disabled"
-            ),
+            Err(error) => {
+                eprintln!("invalid BRIDGE_HTTP_BIND/BRIDGE_HTTP_PORT: {error}; HTTP MCP disabled")
+            }
         }
     }
 

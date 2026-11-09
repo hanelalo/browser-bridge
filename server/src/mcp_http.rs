@@ -47,17 +47,16 @@ pub(crate) async fn serve(addr: SocketAddr, ws_url: String) {
         }
     };
 
-    let service: StreamableHttpService<BridgeMcp, LocalSessionManager> =
-        StreamableHttpService::new(
-            move || Ok(mcp.clone()),
-            Arc::new(LocalSessionManager::default()),
-            // 无状态：不签发 Mcp-Session-Id，也不校验它。
-            // 否则 rmcp 的会话默认 5 分钟无活动就被回收，客户端拿着旧 session id
-            // 再来请求就是 404 "Session not found"（server 重启同样会命中）。
-            // 本服务的工具状态都在 hub / 工具参数里，不依赖 MCP 会话，
-            // 所以逐请求直接服务即可。
-            StreamableHttpServerConfig::default().with_legacy_session_mode(false),
-        );
+    let service: StreamableHttpService<BridgeMcp, LocalSessionManager> = StreamableHttpService::new(
+        move || Ok(mcp.clone()),
+        Arc::new(LocalSessionManager::default()),
+        // 无状态：不签发 Mcp-Session-Id，也不校验它。
+        // 否则 rmcp 的会话默认 5 分钟无活动就被回收，客户端拿着旧 session id
+        // 再来请求就是 404 "Session not found"（server 重启同样会命中）。
+        // 本服务的工具状态都在 hub / 工具参数里，不依赖 MCP 会话，
+        // 所以逐请求直接服务即可。
+        StreamableHttpServerConfig::default().with_legacy_session_mode(false),
+    );
     eprintln!("[mcp-http] MCP over HTTP listening on http://{addr}{MCP_PATH}");
 
     loop {
@@ -108,10 +107,7 @@ async fn dispatch(
 ) -> HttpResponse {
     let path = request.uri().path().to_string();
     if path == "/health" {
-        return json_response(
-            StatusCode::OK,
-            json!({"ok": true, "mcp": MCP_PATH}),
-        );
+        return json_response(StatusCode::OK, json!({"ok": true, "mcp": MCP_PATH}));
     }
     if path != MCP_PATH && !path.starts_with(&format!("{MCP_PATH}/")) {
         return json_response(
