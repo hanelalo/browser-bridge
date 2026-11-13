@@ -780,7 +780,7 @@ async fn main() {
                             let mut summary = result.clone();
                             if let Some(m) = summary.as_object_mut() {
                                 m.remove("data");
-                                m["saved_to"] = json!(path.display().to_string());
+                                m.insert("saved_to".to_string(), json!(path.display().to_string()));
                             }
                             println!("{}", serde_json::to_string_pretty(&summary).unwrap());
                         }

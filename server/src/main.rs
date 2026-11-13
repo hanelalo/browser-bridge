@@ -175,7 +175,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_PORT);
-    let addr = format!("127.0.0.1:{port}");
+    // 默认只绑回环；沙箱场景（容器里的扩展回连宿主机）可用 BRIDGE_BIND 放开
+    let bind = std::env::var("BRIDGE_BIND").unwrap_or_else(|_| "127.0.0.1".into());
+    let addr = format!("{bind}:{port}");
     let listener = TcpListener::bind(&addr).await?;
     let http_port = std::env::var("BRIDGE_HTTP_PORT")
         .ok()
