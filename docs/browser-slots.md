@@ -31,8 +31,10 @@
 - profile 持久化：`~/.bridge/sandbox/profile` bind mount 进容器 `/data/profile`，容器删除不丢扩展安装与登录态。
 - **扩展手动安装**：首次 `start` 后打开 noVNC 地址，在沙箱 Chromium 里 `chrome://extensions` → 开发者模式 → 加载已解压 `/opt/bridge-ext`（宿主机 `extension/dist/chrome-mv3` 只读挂载，更新扩展只需重跑 `pnpm build` + `sandbox.sh stop && start`）→ 顺手开启「允许用户脚本」（解锁 run_script）。一劳永逸，全部安装机制的复杂度（§8、§14 的 CfT/策略/种入）**降级为历史记录与长期备选**。
 - **hub 不改**（单扩展槽位）：沙箱扩展就是唯一连接的扩展；日常 Chrome 里的同名扩展须停用，否则互相抢占槽位。
-- `server.sh` 支持 `BRIDGE_BIND`（沙箱回连需要非 loopback 绑定；设 `0.0.0.0` 会把未鉴权的 hub 暴露到 LAN，鉴权见 protocol.md 预留方向）。
+- `server.sh` 支持 `BRIDGE_BIND`（沙箱回连需要非 loopback 绑定；设 `0.0.0.0` 会把未鉴权的 hub 暴露到 LAN，鉴权见 protocol.md 预留方向）。**注意：每次 `server.sh restart` 都必须显式带 `BRIDGE_BIND=0.0.0.0`，否则回落 127.0.0.1，沙箱扩展会 `ERR_CONNECTION_REFUSED`（且 SW 会持续重试，表象是连接正常但 hub 无注册）。**
 - MCP/CLI 工具面零改动；`bridge-mcp` 无扩展连接时的 `open -a` 拉起逻辑**不再适用**（会拉起用户日常 Chrome），后续改为提示运行 `sandbox.sh start`。
+- 扩展已加 `chrome.runtime.onStartup` 监听（2026-11-14）：MV3 SW 事件驱动，无监听则浏览器启动后永不自启；沙箱实例从此随浏览器启动自动连回 hub。日常浏览器里的扩展需重载一次以注册该事件。
+- **hub 单槽位的运维坑**：扩展在任务执行中途被停用/断连会在 hub 留下未完结 executing 记录，此后**不同实例 ID 的扩展注册会被 Close 拒绝**（hub.rs 防"窗口 ID 顶替"逻辑）——表象是 SW 疯狂重试但永远连不上。解法：重启 bridge-server 清内存态。
 
 暂缓项（设计保留，见 §5/§6）：hub 多浏览器路由、per-slot 配额、多 profile、`daily` 槽位。
 
