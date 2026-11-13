@@ -14,7 +14,8 @@
 # 注意：hub（bridge-server）当前只有一个扩展槽位。若日常 Chrome 里也启用了
 # 同名扩展，两个实例会互相抢占——请只保留沙箱里的那个。
 #
-# 环境变量：BRIDGE_SANDBOX_HOME（默认 ~/.bridge/sandbox，放 profile）
+# 环境变量：BRIDGE_SANDBOX_HOME（默认 ~/.bridge/sandbox，放 profile 与补丁后的扩展副本）、
+#           BRIDGE_SANDBOX_HOST_WS（宿主机在容器网络里的 WS 地址，默认 192.168.64.1）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,6 +24,8 @@ IMAGE="bridge-sandbox"
 SANDBOX_HOME="${BRIDGE_SANDBOX_HOME:-$HOME/.bridge/sandbox}"
 PROFILE_DIR="$SANDBOX_HOME/profile"
 EXT_SRC="$ROOT/extension/dist/chrome-mv3"
+EXT_PATCHED="$SANDBOX_HOME/ext"
+HOST_WS="${BRIDGE_SANDBOX_HOST_WS:-192.168.64.1}"
 VNC_PORT=6080
 CLIENT="$ROOT/target/debug/bridge-client"
 
@@ -53,14 +56,21 @@ cmd_start() {
 
   mkdir -p "$PROFILE_DIR"
 
-  info "[1/4] 构建镜像（首次较慢，之后走缓存）"
+  info "[1/4] 准备扩展副本 (WS 地址补丁为 ws://${HOST_WS}:9225, 仓库产物不动)"
+  rm -rf "$EXT_PATCHED"
+  cp -R "$EXT_SRC" "$EXT_PATCHED"
+  LC_ALL=C grep -rlF 'ws://127.0.0.1:9225' "$EXT_PATCHED" | while IFS= read -r f; do
+    LC_ALL=C sed -i '' "s|ws://127.0.0.1:9225|ws://$HOST_WS:9225|g" "$f"
+  done
+
+  info "[2/4] 构建镜像（首次较慢，之后走缓存）"
   container build -t "$IMAGE" "$ROOT/scripts/sandbox" 2>&1 | tail -2
 
-  info "[2/4] 启动容器 (profile: $PROFILE_DIR)"
+  info "[3/4] 启动容器 (profile: $PROFILE_DIR)"
   container rm -f "$NAME" >/dev/null 2>&1 || true
   container run -d --name "$NAME" --cpus 2 --memory 4g \
     -v "$PROFILE_DIR":/data/profile \
-    -v "$EXT_SRC":/opt/bridge-ext:ro \
+    -v "$EXT_PATCHED":/opt/bridge-ext:ro \
     "$IMAGE" >/dev/null
   sleep 3
 
