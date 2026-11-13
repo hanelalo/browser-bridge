@@ -12,10 +12,15 @@ openbox &
 x11vnc -display :99 -rfbport 5900 -nopw -forever -shared -quiet &
 websockify --web=/usr/share/novnc 6080 localhost:5900 &
 
-CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage \
+CHROME_FLAGS="--disable-dev-shm-usage \
   --no-first-run --no-default-browser-check --disable-session-crashed-bubble \
   --disable-background-timer-throttling --disable-backgrounding-occluded-windows \
   --disable-renderer-backgrounding --disable-features=IntensiveWakeUpThrottling \
   --enable-unsafe-swiftshader --use-gl=angle --use-angle=swiftshader"
 
-exec chromium $CHROME_FLAGS --user-data-dir=/data/profile about:blank
+# profile 目录归 sandbox 用户（宿主机挂载进来的目录属主是宿主 uid）
+if [ "$(stat -c %u /data/profile)" != "$(id -u sandbox)" ]; then
+  chown -R sandbox:sandbox /data/profile
+fi
+# runuser 保留环境（DISPLAY 等）；Xvfb/x11vnc/websockify 仍以 root 常驻
+exec runuser -u sandbox -- chromium $CHROME_FLAGS --user-data-dir=/data/profile about:blank

@@ -13,7 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    # 非 root 用户跑 Chromium：root 下 Chrome 强制 --no-sandbox 并弹"unsupported flag"黄条；
+    # 普通用户保留 Chrome 自身的 setuid/namespace 沙箱，黄条消失
+    && useradd --create-home --shell /bin/sh sandbox
 
 ENV DISPLAY=:99
 ENTRYPOINT ["/entrypoint.sh"]
