@@ -38,10 +38,8 @@ container_ip() {
 }
 
 vnc_url() {
-  local ip
-  ip="$(container_ip)"
-  [[ -n "$ip" ]] || return 1
-  printf 'http://%s:%s/vnc.html?path=websockify&autoconnect=true\n' "$ip" "$VNC_PORT"
+  # noVNC 固定发布到宿主机回环端口，IP 漂移不影响入口地址
+  printf 'http://127.0.0.1:%s/vnc.html?path=websockify&autoconnect=true\n' "$VNC_PORT"
 }
 
 # hub 当前是否连着扩展（连着的理应是沙箱）
@@ -71,6 +69,7 @@ cmd_start() {
   container run -d --name "$NAME" --cpus 2 --memory 4g \
     -v "$PROFILE_DIR":/data/profile \
     -v "$EXT_PATCHED":/opt/bridge-ext:ro \
+    -p 127.0.0.1:"$VNC_PORT":6080 \
     "$IMAGE" >/dev/null
   sleep 3
 
@@ -108,7 +107,7 @@ cmd_status() {
     info "容器: 未运行（启动: ./scripts/sandbox.sh start）"
   else
     info "容器: 运行中 ($ip)"
-    info "noVNC: http://$ip:$VNC_PORT/vnc.html?path=websockify&autoconnect=true"
+    info "noVNC: $(vnc_url)"
   fi
   if hub_connected; then
     info "hub:   已连有扩展（槽位唯一，无法区分是沙箱还是日常 Chrome；"
