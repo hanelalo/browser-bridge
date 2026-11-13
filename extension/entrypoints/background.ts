@@ -1998,4 +1998,9 @@ export default defineBackground(() => {
     connect();
     void ensureOffscreen();
   }).catch((error) => console.error('bridge state initialization failed', error));
+  // MV3 SW 是事件驱动的：没有监听事件的话，浏览器启动后 SW 不会自启，
+  // 沙箱/无头实例会一直处于离线直到某个标签页事件碰巧唤醒它。
+  chrome.runtime.onStartup.addListener(() => {
+    void stateReady.then(() => connect()).catch(() => connect());
+  });
 });
