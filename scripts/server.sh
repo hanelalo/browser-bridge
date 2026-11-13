@@ -8,7 +8,9 @@
 #   ./scripts/server.sh logs       # tail -f 日志
 #
 # 环境变量：BRIDGE_PORT（默认 9225）、BRIDGE_HTTP_PORT（默认 9226，0 关闭）、
-#           BRIDGE_HTTP_BIND（默认 127.0.0.1）、BRIDGE_SERVER_BIN（指定二进制）、
+#           BRIDGE_HTTP_BIND（默认 127.0.0.1）、BRIDGE_BIND（WS 监听地址，默认 127.0.0.1；
+#           容器沙箱回连宿主机需设 0.0.0.0，注意这会把未鉴权的 hub 暴露到 LAN）、
+#           BRIDGE_SERVER_BIN（指定二进制）、
 #           BRIDGE_LOG（默认 /tmp/bridge-server.log）、BRIDGE_RUN_DIR（默认 <repo>/.run，放 pid）
 set -euo pipefail
 
@@ -19,6 +21,7 @@ LOG_FILE="${BRIDGE_LOG:-/tmp/bridge-server.log}"
 WS_PORT="${BRIDGE_PORT:-9225}"
 HTTP_PORT="${BRIDGE_HTTP_PORT:-9226}"
 HTTP_BIND="${BRIDGE_HTTP_BIND:-127.0.0.1}"
+BIND="${BRIDGE_BIND:-127.0.0.1}"
 START_TIMEOUT="${BRIDGE_START_TIMEOUT:-10}"
 
 # ---------- 工具函数 ----------
@@ -94,7 +97,7 @@ managed_pid() {
 }
 
 endpoints() {
-  info "  WS:    ws://127.0.0.1:$WS_PORT"
+  info "  WS:    ws://$BIND:$WS_PORT (bind=$BIND)"
   if [[ "$HTTP_PORT" != "0" ]]; then
     info "  MCP:   http://$HTTP_BIND:$HTTP_PORT/mcp"
     info "  health http://$HTTP_BIND:$HTTP_PORT/health"
@@ -149,6 +152,7 @@ cmd_start() {
   mkdir -p "$(dirname "$LOG_FILE")"
   info "启动 $bin"
   BRIDGE_PORT="$WS_PORT" BRIDGE_HTTP_PORT="$HTTP_PORT" BRIDGE_HTTP_BIND="$HTTP_BIND" \
+    BRIDGE_BIND="$BIND" \
     nohup "$bin" >>"$LOG_FILE" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" >"$PID_FILE"
@@ -270,7 +274,8 @@ usage() {
   logs [n]  跟随日志（默认先看最后 50 行）
 
 环境变量: BRIDGE_PORT(9225) BRIDGE_HTTP_PORT(9226,0=关闭)
-          BRIDGE_HTTP_BIND(127.0.0.1) BRIDGE_SERVER_BIN BRIDGE_LOG(/tmp/bridge-server.log)
+          BRIDGE_HTTP_BIND(127.0.0.1) BRIDGE_BIND(127.0.0.1,容器沙箱设 0.0.0.0)
+          BRIDGE_SERVER_BIN BRIDGE_LOG(/tmp/bridge-server.log)
           BRIDGE_RUN_DIR(<repo>/.run, 放 pid) BRIDGE_START_TIMEOUT(10)
 USAGE
 }

@@ -21,6 +21,21 @@
 | D7 | `sandbox-gui` 镜像内置 **Xvfb + noVNC**：人工登录/验证码接管在容器内完成，不碰用户浏览器 |
 | D8 | headless 被降级为可选快路径：实测部分站点反爬直接拦截 headless，有头 + 虚拟显示是兼容性正解 |
 
+## 2.1 实现范围修订（2026-11-14）
+
+需求变更：**多 profile 暂缓**，沙箱保留，且**扩展由用户手动安装**（不再做自动安装机制）。
+
+当前落地范围（阶段 0，单沙箱）：
+
+- 只实现 `sandbox-gui` 单实例：Apple container + Debian Chromium + Xvfb + openbox + noVNC，镜像在 `scripts/sandbox/`，生命周期工具 `scripts/sandbox.sh`（start/stop/status/logs/vnc）。
+- profile 持久化：`~/.bridge/sandbox/profile` bind mount 进容器 `/data/profile`，容器删除不丢扩展安装与登录态。
+- **扩展手动安装**：首次 `start` 后打开 noVNC 地址，在沙箱 Chromium 里 `chrome://extensions` → 开发者模式 → 加载已解压 `/opt/bridge-ext`（宿主机 `extension/dist/chrome-mv3` 只读挂载，更新扩展只需重跑 `pnpm build` + `sandbox.sh stop && start`）→ 顺手开启「允许用户脚本」（解锁 run_script）。一劳永逸，全部安装机制的复杂度（§8、§14 的 CfT/策略/种入）**降级为历史记录与长期备选**。
+- **hub 不改**（单扩展槽位）：沙箱扩展就是唯一连接的扩展；日常 Chrome 里的同名扩展须停用，否则互相抢占槽位。
+- `server.sh` 支持 `BRIDGE_BIND`（沙箱回连需要非 loopback 绑定；设 `0.0.0.0` 会把未鉴权的 hub 暴露到 LAN，鉴权见 protocol.md 预留方向）。
+- MCP/CLI 工具面零改动；`bridge-mcp` 无扩展连接时的 `open -a` 拉起逻辑**不再适用**（会拉起用户日常 Chrome），后续改为提示运行 `sandbox.sh start`。
+
+暂缓项（设计保留，见 §5/§6）：hub 多浏览器路由、per-slot 配额、多 profile、`daily` 槽位。
+
 ## 3. 三档 Slot 模型
 
 | slot 类型 | 形态 | 焦点礼仪 | 反爬表现 | 用途 |
