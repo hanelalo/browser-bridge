@@ -927,6 +927,9 @@ fn extension_instance_change_completes_stale_executions_instead_of_rejecting() {
     let resolve = recv(&mut f.browser);
     assert_eq!(resolve.method.as_deref(), Some("_resolve_target"));
     f.track(7);
-    f.respond(&resolve, json!({"window_ids":[7],"params":{"tab_id":70,"window_id":7}}));
+    f.respond(
+        &resolve,
+        json!({"window_ids":[7],"params":{"tab_id":70,"window_id":7}}),
+    );
     assert_eq!(recv(&mut f.browser).method.as_deref(), Some("run_script"));
 }

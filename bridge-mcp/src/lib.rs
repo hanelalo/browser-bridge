@@ -227,6 +227,25 @@ struct SetValueParams {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+struct UploadFileParams {
+    target: String,
+    /// 本地文件路径列表（总大小上限 30 MB）
+    files: Vec<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    tab_id: Option<i32>,
+    #[serde(default)]
+    window_id: Option<i32>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 struct CheckParams {
     target: String,
     /// 是否勾选（默认 true；false 表示取消）
@@ -1081,6 +1100,27 @@ impl BridgeMcp {
         let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
         v["value"] = json!(p.value);
         call(&bridge, "sv", "set_value", v).await
+    }
+
+    #[tool(
+        name = "upload_file",
+        description = "把本地文件填入 <input type=file> 并触发 input/change 事件（表单上传用）。files 是本地路径数组，总大小上限 30 MB；仅支持标准文件选择器，拖拽区等自定义上传控件不支持"
+    )]
+    pub async fn upload_file(
+        &self,
+        params: Parameters<UploadFileParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let bridge = self.bridge.with_context(
+            params.0.window_id,
+            params.0.task_id.clone(),
+            params.0.agent_id.clone(),
+        );
+        let p = params.0;
+        let files = bridge_core::upload::prepare_files(&p.files)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let mut v = with_target(&p.target, p.by.as_deref(), p.index, p.tab_id, p.window_id);
+        v["files"] = json!(files);
+        call(&bridge, "upl", "upload_file", v).await
     }
 
     #[tool(name = "check", description = "勾选/取消 checkbox 或 radio")]

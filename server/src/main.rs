@@ -12,7 +12,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc,
 };
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{accept_async_with_config, tungstenite::Message};
 
 const DEFAULT_PORT: u16 = 9225;
 /// MCP over HTTP 的默认端口（可用 `BRIDGE_HTTP_PORT` 覆盖，设为 0 关闭）
@@ -82,7 +82,8 @@ async fn handle_conn(
     addr: SocketAddr,
     hub_tx: mpsc::UnboundedSender<HubMsg>,
 ) {
-    let ws = match accept_async(stream).await {
+    let ws = match accept_async_with_config(stream, Some(bridge_core::transport::ws_config())).await
+    {
         Ok(ws) => ws,
         Err(err) => {
             eprintln!("[{addr}] websocket handshake failed: {err}");

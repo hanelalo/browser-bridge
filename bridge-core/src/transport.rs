@@ -15,12 +15,24 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 
 pub type BridgeStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// WebSocket 配置：默认帧上限只有 16 MiB，会挡住 upload_file 的大 payload
+/// （30 MB 文件 base64 后约 40 MB），放宽为消息 64 MiB、帧不限。
+/// server 的 accept 端与客户端连接端必须使用同一份配置。
+pub fn ws_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(64 * 1024 * 1024),
+        max_frame_size: None,
+        ..Default::default()
+    }
+}
 
 /// Multiplexed transport. Reconnect future calls without replaying sent operations.
 #[derive(Clone)]
@@ -425,7 +437,7 @@ fn fail_pending(pending: &mut HashMap<String, Pending>, error: &str) {
 
 /// 连接 server 并完成 hello 握手；连接失败时自动拉起 bridge-server。
 pub async fn connect_bridge(server: &str, client_id: &str) -> Result<BridgeStream, String> {
-    match connect_async(server).await {
+    match connect_async_with_config(server, Some(ws_config()), false).await {
         Ok((ws, _)) => finish_hello(ws, client_id).await,
         Err(first_err) => {
             // server 未运行：自动拉起一个，并等它就绪
@@ -434,7 +446,7 @@ pub async fn connect_bridge(server: &str, client_id: &str) -> Result<BridgeStrea
                     eprintln!("已自动启动 bridge-server");
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                     loop {
-                        match connect_async(server).await {
+                        match connect_async_with_config(server, Some(ws_config()), false).await {
                             Ok((ws, _)) => return finish_hello(ws, client_id).await,
                             Err(e) => {
                                 if tokio::time::Instant::now() >= deadline {
@@ -461,7 +473,7 @@ pub async fn connect_bridge_no_spawn(
     server: &str,
     client_id: &str,
 ) -> Result<BridgeStream, String> {
-    let (ws, _) = connect_async(server)
+    let (ws, _) = connect_async_with_config(server, Some(ws_config()), false)
         .await
         .map_err(|e| format!("无法连接 {server}: {e}"))?;
     finish_hello(ws, client_id).await

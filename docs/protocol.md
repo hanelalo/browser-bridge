@@ -1,6 +1,6 @@
 # Browser Bridge 协议
 
-传输层为 WebSocket，默认地址 `ws://127.0.0.1:9225`。所有消息均为 JSON 文本帧。
+传输层为 WebSocket，默认地址 `ws://127.0.0.1:9225`。所有消息均为 JSON 文本帧。单条消息上限 64 MiB（`upload_file` 的大 payload 需要：30 MB 文件 base64 后约 40 MB），WebSocket 帧大小不设限（tungstenite 默认帧上限 16 MiB 会挡住大消息）。
 
 > 本文件描述的 WebSocket 协议与端口未因 MCP over HTTP 发生任何改变。`bridge-server` 额外在 `127.0.0.1:9226/mcp` 提供 MCP（Streamable HTTP）端点，内部以一个普通 client 连接回到同一个 hub。
 
@@ -97,7 +97,7 @@ server 为 bridge 自建的窗口和标签页维护资源队列（只统计经�
 
 ### 元素定位 target
 
-`click`、`press_key`、`scroll`、`set_value`、`check`、`select_option`、`clear`、`get_value` 都支持统一的元素定位，通过 `params.target` 指定：
+`click`、`press_key`、`scroll`、`set_value`、`check`、`select_option`、`clear`、`get_value`、`upload_file` 都支持统一的元素定位，通过 `params.target` 指定：
 
 ```json
 { "by": "css", "value": "#submit", "index": 0 }
@@ -423,6 +423,36 @@ result：
 
 ```json
 { "element": { "tag": "input", "type": "text" }, "value": "alice", "tab_id": 7 }
+```
+
+### upload_file
+
+把本地文件填入 `<input type=file>` 并派发 input、change 事件（触发表单校验与上传流程）。
+客户端（CLI / MCP）负责读取本地文件并 base64 编码进 `params.files`；单次调用文件总大小上限 30 MB，超出会被 client / 扩展两侧拒绝。仅支持标准文件选择器，拖拽区等自定义上传控件不支持。
+
+params：
+
+```json
+{
+  "target": { "by": "css", "value": "#avatar" },
+  "files": [
+    { "name": "avatar.png", "mime": "image/png", "size": 12345, "data_base64": "iVBORw0KG..." }
+  ],
+  "tab_id": 7
+}
+```
+
+- `files[].mime`：可省略，省略时按 `application/octet-stream` 处理。
+- `files[].size`：解码后字节数，由客户端填写，扩展端用于限额校验（以实际解码结果为准）。
+
+result：
+
+```json
+{
+  "element": { "tag": "input", "type": "file" },
+  "files": [{ "name": "avatar.png", "size": 12345, "mime": "image/png" }],
+  "tab_id": 7
+}
 ```
 
 ### check

@@ -4,3 +4,4 @@
 pub mod recipes;
 pub mod target;
 pub mod transport;
+pub mod upload;

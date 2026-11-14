@@ -301,6 +301,16 @@ enum Cmd {
         #[arg(long)]
         tab: Option<i32>,
     },
+    /// 把本地文件填入 <input type=file>（总大小上限 30 MB）
+    UploadFile {
+        #[command(flatten)]
+        target: Target,
+        /// 本地文件路径（可多个）
+        files: Vec<String>,
+        /// 指定标签页 id（默认当前激活标签页）
+        #[arg(long)]
+        tab: Option<i32>,
+    },
     /// 勾选/取消勾选 checkbox 或 radio
     Check {
         #[command(flatten)]
@@ -655,6 +665,19 @@ async fn main() {
             "set_value",
             json!({ "target": target.spec(), "value": value, "tab_id": tab }),
         ),
+        Cmd::UploadFile { target, files, tab } => {
+            let prepared = match bridge_core::upload::prepare_files(&files) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            (
+                "upload_file",
+                json!({ "target": target.spec(), "files": prepared, "tab_id": tab }),
+            )
+        }
         Cmd::Check {
             target,
             uncheck,

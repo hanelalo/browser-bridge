@@ -58,6 +58,7 @@ cargo run -- --window 5 list-tabs
 cargo run -- navigate https://example.com
 cargo run -- click '#submit'
 cargo run -- set_value '#username' alice
+cargo run -- upload-file '#avatar' ./avatar.png
 cargo run -- scrape 'div.card' --fields 'name:.name,price:.price,img:img@src'
 cargo run -- querydomains 'browserbridge'
 cargo run -- googlesearch 'Haze Seas'
@@ -90,6 +91,7 @@ cargo run -- screenshot --out shot.png
 | `press-key <key>` | 模拟按键（支持修饰键、`--wait-load`） |
 | `scroll --dx --dy` | 滚动窗口或指定容器 |
 | `set-value <target> <value>` | 设置 input/textarea/contenteditable 的值 |
+| `upload-file <target> <file>...` | 把本地文件填入 `<input type=file>`（总大小上限 30 MB，可多个文件） |
 | `check <target>` | 勾选/取消 checkbox、radio |
 | `select-option <target> --text/--value/--option-index` | 选中下拉项 |
 | `clear <target>` | 清空输入类元素 |
@@ -377,7 +379,7 @@ bridge-mcp/               # MCP server（stdio，每个指令一个 tool）
 - 每个 agent（`mcp-` 身份）默认拥有一个**专用浏览器窗口**：标签页默认开在那里，不占你正在看的窗口、不抢焦点；工具也可传 `window_id` 在多个窗口间调度。
 - server 全局最多同时执行 3 个任务，同一个窗口同时只执行 1 个任务；站点配方会持有窗口任务租约直到流程结束。
 - MCP 结束或断线不会退出共享 Chrome；窗口清理由显式工具调用发起，并经过 server 调度；
-- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare` / `oldgoogletrends_compare`。
+- 工具列表：`list_tabs` / `close_tab` / `close_auto_tabs` / `close_agent_window` / `new_tab` / `activate_tab` / `navigate` / `click` / `click_at` / `press_key` / `scroll` / `set_value` / `upload_file` / `check` / `select_option` / `clear` / `get_value` / `scrape` / `run_script` / `get_page_content` / `get_page_markdown` / `get_a11y_tree` / `screenshot` / `googlesearch` / `redditsearch` / `youtubesearch` / `youtubeinfo` / `youtuberinfo` / `googletrends` / `oldgoogletrends` / `googletrends_compare` / `oldgoogletrends_compare`。
 
 ### MCP over HTTP（可选）
 

@@ -474,7 +474,7 @@ async function resolveTarget(
   }
   const pageMethods = ['task_begin', 'new_tab', 'close_tab', 'activate_tab', 'navigate', 'click', 'click_at',
     'press_key', 'run_script', 'scroll', 'set_value', 'check', 'select_option', 'clear', 'get_value',
-    'scrape', 'get_page_content', 'get_page_markdown', 'get_a11y_tree', 'screenshot'];
+    'upload_file', 'scrape', 'get_page_content', 'get_page_markdown', 'get_a11y_tree', 'screenshot'];
   if (!pageMethods.includes(method)) throw new Error(`unknown method: ${method}`);
   // Target discovery must stay read-only. Ask the server to schedule default
   // window creation under its global limit, then resolve again.
@@ -600,6 +600,7 @@ async function execute(
     case 'select_option':
     case 'clear':
     case 'get_value':
+    case 'upload_file':
     case 'scrape':
       return runPageOp(method, params, clientId);
     case 'get_page_content':
@@ -1915,6 +1916,43 @@ async function pageOp(op: string, params: Record<string, unknown>): Promise<unkn
               ? el.value
               : el.textContent ?? '';
           return { element: describe(el), value: current };
+        }
+        case 'upload_file': {
+          if (!(el instanceof HTMLInputElement) || el.type !== 'file') {
+            throw new Error(`upload_file requires an <input type=file>: ${describe(el).tag}`);
+          }
+          const rawFiles = Array.isArray(params.files) ? params.files : [];
+          if (rawFiles.length === 0) throw new Error('upload_file requires params.files (non-empty array)');
+          const MAX_TOTAL = 30 * 1024 * 1024;
+          const decodeBase64 = (b64: string): Uint8Array => {
+            const bin = atob(b64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+            return bytes;
+          };
+          const dt = new DataTransfer();
+          let total = 0;
+          for (const raw of rawFiles) {
+            const f = raw as { name?: unknown; mime?: unknown; data_base64?: unknown };
+            if (typeof f?.name !== 'string' || typeof f?.data_base64 !== 'string') {
+              throw new Error('each params.files item requires name and data_base64');
+            }
+            const bytes = decodeBase64(f.data_base64);
+            total += bytes.length;
+            if (total > MAX_TOTAL) {
+              throw new Error('upload_file files exceed the 30 MB total limit');
+            }
+            const mime = typeof f.mime === 'string' && f.mime ? f.mime : 'application/octet-stream';
+            dt.items.add(new File([bytes], f.name, { type: mime }));
+          }
+          // DataTransfer 构造 FileList 后赋给 input.files，再派发 change 触发表单校验/上传流程
+          el.files = dt.files;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return {
+            element: describe(el),
+            files: Array.from(el.files).map((f) => ({ name: f.name, size: f.size, mime: f.type })),
+          };
         }
         case 'check': {
           if (!(el instanceof HTMLInputElement) || (el.type !== 'checkbox' && el.type !== 'radio')) {

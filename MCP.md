@@ -350,6 +350,7 @@ YouTube 搜索，支持上传日期与优先顺序筛选。直接解析搜索结
 | `press_key` | 模拟按键（Enter / Escape / a / F5 等，支持修饰键） | `key`（必填，KeyboardEvent.key 值）、`modifiers`、`target`/`by`/`index`、`wait_load`（按键后等待加载）、`tab_id` |
 | `scroll` | 滚动窗口或指定容器 | `dx`、`dy`、`target`/`by`/`index`、`smooth`、`tab_id` |
 | `set_value` | 设置 input / textarea / contenteditable 的值 | `target`（必填）、`value`（必填）、`by`、`index`、`tab_id` |
+| `upload_file` | 把本地文件填入 `<input type=file>`（表单上传） | `target`（必填）、`files`（必填，本地路径数组，总大小上限 30 MB）、`by`、`index`、`tab_id` |
 | `check` | 勾选 / 取消 checkbox 或 radio | `target`（必填）、`checked`（默认 true）、`by`、`index`、`tab_id` |
 | `select_option` | 选中 `<select>` 的某个选项 | `target`（必填）、`option_value` / `option_text` / `option_index`（三选一）、`by`、`index`、`tab_id` |
 | `clear` | 清空 input / textarea / contenteditable | `target`（必填）、`by`、`index`、`tab_id` |

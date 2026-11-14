@@ -5,6 +5,7 @@ edition = "2021"
 description = "Browser Bridge WebSocket hub"
 
 [dependencies]
+bridge-core = { path = "../bridge-core" }
 bridge-mcp = { path = "../bridge-mcp" }
 futures-util = "0.3"
 http = "1"
