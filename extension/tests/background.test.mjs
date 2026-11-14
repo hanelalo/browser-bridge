@@ -116,16 +116,23 @@ test('startup removes legacy result cache before writing, preserving unfinished 
   assert.ok(bg.storageWrites.every((bytes) => bytes < 1024));
   assert.equal(JSON.stringify(bg.data.bridgeExecutions), '[["active-old",{"state":"unknown","window_ids":[5]}]]');
   const sync = await bg.syncExecutions(['large-old', 'active-old']);
+  // SW 重启恢复的条目（unknown）：await 链已随旧 worker 死亡，按 finished
+  // 上报并删除，server 据此释放额度，不再把窗口锁永久占住
   assert.equal(sync.executions.find((r) => r.id === 'large-old').state, 'finished');
-  assert.equal(sync.executions.find((r) => r.id === 'active-old').state, 'unknown');
+  assert.equal(sync.executions.find((r) => r.id === 'active-old').state, 'finished');
+  assert.equal(bg.data.bridgeExecutions.length, 0);
 });
 
-test('running journal entries become unknown after worker restart, not finished', async () => {
-  const bg = await background({ bridgeExecutions: [['old', { state: 'running', window_ids: [5] }]] });
-  assert.equal((await bg.syncExecutions(['old'])).executions[0].state, 'unknown');
-  bg.windows.delete(5);
-  assert.equal((await bg.syncExecutions(['old'])).executions[0].state, 'closed');
-  assert.equal(bg.data.bridgeExecutions.length, 0);
+test('unknown journal entries release capacity at sync; live ones stay reserved', async () => {
+  const bg = await background({ bridgeExecutions: [['dead', { state: 'running', window_ids: [5] }]] });
+  // worker 活着、确有其事的执行：照常上报 running，等真实完成响应释放
+  bg.executions.set('alive', { state: 'running', window_ids: [5], started_at: Date.now() });
+  const sync = await bg.syncExecutions(['dead', 'alive']);
+  const byId = Object.fromEntries(sync.executions.map((r) => [r.id, r]));
+  assert.equal(byId.dead.state, 'finished');
+  assert.equal(byId.alive.state, 'running');
+  assert.equal(bg.executions.has('dead'), false);
+  assert.equal(bg.executions.has('alive'), true);
 });
 
 test('background rejects overlapping operations even if a server sends invalid permits', async () => {
@@ -160,4 +167,37 @@ test('window task query returns the scheduler snapshot for one window', async ()
   };
   bg.setSocket(socket);
   assert.equal(JSON.stringify(await bg.requestWindowTasks(5)), JSON.stringify(snapshot));
+});
+
+test('stale executions are expired and the server is told to release capacity', async () => {
+  const bg = await background({ bridgeExecutions: [['lost', { state: 'running', window_ids: [5] }]] });
+  const sent = [];
+  bg.setSocket({ readyState: 1, send: (s) => sent.push(JSON.parse(s)) });
+  // 模拟条目超龄：真实场景是 SW 挂起/丢失，server 客户端超时上限 600s，
+  // 超过 660s 的条目不可能还在执行
+  bg.executions.get('lost').started_at = Date.now() - 700_000;
+  const sync = await bg.syncExecutions(['lost']);
+  const expired = sent.find((m) => m.method === '_execution_expired');
+  assert.ok(expired, 'must notify the server');
+  assert.equal(expired.params.id, 'lost');
+  assert.equal(bg.executions.has('lost'), false);
+  // 条目已删除，sync 走 missing-id 路径也报 finished，server 收到后同样释放
+  assert.equal(sync.executions.length, 1);
+  assert.equal(sync.executions[0].id, 'lost');
+  assert.equal(sync.executions[0].state, 'finished');
+  assert.equal(bg.data.bridgeExecutions.length, 0);
+});
+
+test('fresh entries and admission are untouched by the expiry sweep', async () => {
+  const bg = await background();
+  const sent = [];
+  const socket = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
+  bg.setSocket(socket);
+  bg.executions.set('young', { state: 'running', window_ids: [9], started_at: Date.now() });
+  await bg.syncExecutions(['young']);
+  assert.ok(!sent.some((m) => m.method === '_execution_expired'), 'young entries must survive');
+  assert.equal(bg.executions.has('young'), true);
+  const command = JSON.stringify({ id: 'op', method: 'get_page_content', params: { tab_id: 10, window_id: 5, _window_ids: [5] } });
+  await bg.handleMessage(socket, command);
+  assert.equal(bg.executions.has('op'), false, 'completed dispatch leaves no record behind');
 });

@@ -36,7 +36,7 @@ server 对所有 client 统一调度：最多同时执行 3 个任务；同一�
 
 任务管理方法：`task_begin` 申请窗口租约并返回 `task_id`、`window_id`、`tab_id`；`task_status` 查询状态；`task_end` 结束；`task_cancel` 取消。后三者接收 `{ "task_id": "..." }`。租约绑定发起连接，`agent_id` 可选，用于标记同一 MCP 会话下的逻辑 agent。已获得额度但没有在途操作的租约空闲 60 秒后回收。
 
-server 内部使用 `_resolve_target` 固定执行目标、`_sync_executions` 核对执行记录、`_window_tasks` 查询某个窗口的调度快照。客户端不能调用这些内部方法。
+server 内部使用 `_resolve_target` 固定执行目标、`_sync_executions` 核对执行记录、`_window_tasks` 查询某个窗口的调度快照。扩展在丢弃超龄执行条目时用 `_execution_expired`（`{ id }`）通知 server 按丢失释放额度。客户端不能调用这些内部方法。
 
 `_window_tasks` 只读，不参与准入。扩展侧边栏用它显示当前窗口里正在执行和排队的任务：
 
@@ -44,7 +44,7 @@ server 内部使用 `_resolve_target` 固定执行目标、`_sync_executions` �
 { "id": "snap-1", "method": "_window_tasks", "params": { "window_id": 5 } }
 ```
 
-result：`{ window_id, running[], pending[] }`。`running` 是已经占用该窗口的任务（含收尾中），`pending` 是已经解析到该窗口、还在等额度或等窗口空闲的任务。每项含 `task_id` / `agent_id` / `client_id` / `state`（`running` / `closing` / `queued`）/ `window_ids` / `tab_id` / `inflight` / `queued`。`inflight` 是当前这条浏览器指令，`queued` 是同一任务里还没开始的指令；单条指令没有 `task_id` 时 `task_id` 为 `null`。扩展仅持久化未完成操作的请求 ID、窗口和运行状态，操作完成后删除记录，不缓存结果。断线导致结果丢失时，由调用方重新发起请求；重连同步仅用于核对窗口占用和释放额度。server 重启后也会接管扩展报告的未完成操作，保留对应额度。若 service worker 重启且不能确认页面脚本是否结束，会继续保留资源；手动关闭涉及的窗口后可确认释放。
+result：`{ window_id, running[], pending[] }`。`running` 是已经占用该窗口的任务（含收尾中），`pending` 是已经解析到该窗口、还在等额度或等窗口空闲的任务。每项含 `task_id` / `agent_id` / `client_id` / `state`（`running` / `closing` / `queued`）/ `window_ids` / `tab_id` / `inflight` / `queued`。`inflight` 是当前这条浏览器指令，`queued` 是同一任务里还没开始的指令；单条指令没有 `task_id` 时 `task_id` 为 `null`。扩展仅持久化未完成操作的请求 ID、窗口和运行状态，操作完成后删除记录，不缓存结果。断线导致结果丢失时，由调用方重新发起请求；重连同步仅用于核对窗口占用和释放额度。server 重启后也会接管扩展报告的未完成操作，保留对应额度。执行条目有 660 秒最大寿命（超过客户端 600s 超时上限加余量）：service worker 重启恢复的条目在重连同步时按 `finished` 上报并删除，超龄未完成的条目由扩展主动上报 `_execution_expired`，server 对采纳的孤儿执行也有等长租期兜底——三者都保证"执行已死则额度必释放"，不会把窗口锁永久占住。
 
 客户端传输重连后，旧连接签发或使用过的任务不能继续执行新指令，必须重新申请任务；不会把旧 `task_id` 静默绑定到默认窗口。新任务仍需等待旧操作实际结束后才能获得资源。默认专用窗口的首次创建也经过全局额度调度。
 
@@ -58,10 +58,10 @@ server 为 bridge 自建的窗口和标签页维护资源队列（只统计经�
 
 - **窗口队列**：容量 5，记录 `window_id` 与最近一次使用时间（任何指令解析命中该窗口即刷新）。来源包括 agent/CLI 专用窗口、`new_window`。
 - **标签页队列**：容量 20，记录 `tab_id`、所属 `window_id` 与最近一次使用时间。来源包括 `new_tab`、`new_window` 的首个标签页、默认窗口引导的初始标签页、`click --new-tab`。
-- **逐出**：`new_tab` / `new_window` / `click --new-tab`（以及默认窗口引导）放行前检查容量——tab 队列满 20 时先关闭最旧的 5 个标签页；窗口队列满 5 时（新建窗口场景）先关闭最旧的 3 个窗口。逐出是发射后不管的直发 `close_tab` / `close_window`，不占用任务调度额度；严格按最旧逐出，不做"在用保护"，正被任务使用的资源被逐出时该任务会收到失败。
+- **逐出**：`new_tab` / `new_window` / `click --new-tab`（以及默认窗口引导）放行前检查容量——tab 队列满 20 时先关闭最旧的 5 个标签页；窗口队列满 5 时（新建窗口场景）先关闭最旧的 3 个窗口。逐出是发射后不管的直发 `close_tab` / `close_window`，不占用任务调度额度；严格按最旧逐出，不做"在用保护"，正被任务使用的资源被逐出时该任务会收到失败。直发关闭（含配方结束后的延迟关闭）在发射时同步回收对应记录，不残留死条目。
 - **级联**：标签页被关闭后其所在窗口可能随之关闭（Chrome 行为）。扩展通过 `_window_removed` 通知 server，server 把该窗口连同其标签页记录一并移除。
 - **隔离强制**：除 `new_window`、`close_auto_tabs`、`close_agent_window` 外，任何指令解析命中的窗口都必须是 bridge 自建窗口，否则报错 `bridge may only operate on windows it created...`。这意味着 bridge 不能读写或关闭用户自己的窗口与标签页；指定 `tab_id` 时其所在窗口也必须是 bridge 自建的。
-- **对账**：扩展连接建立后发送内部消息 `_bridge_inventory`（`{ windows: [...], tabs: [{ tab_id, window_id }] }`），server 据此重建资源队列（server 重启后队列不丢对已有 bridge 窗口的识别）。客户端不能调用该内部方法。
+- **对账**：扩展连接建立后发送内部消息 `_bridge_inventory`（`{ windows: [...], tabs: [{ tab_id, window_id }] }`），server 据此**全量重建**资源队列（server 重启后队列不丢对已有 bridge 窗口的识别；同时清掉 server 侧已失效的窗口/标签页记录，如离线期间被关闭的资源）。客户端不能调用该内部方法。
 
 `new_tab` 与 `click --new-tab` 的响应带 `window_id`（新标签页所在窗口），供 server 记账；`close_tab` / `close_window` / `close_auto_tabs` 成功后 server 回收对应记录。
 

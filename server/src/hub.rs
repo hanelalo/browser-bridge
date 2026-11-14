@@ -10,6 +10,10 @@ use tokio_tungstenite::tungstenite::Message;
 const MAX_RUNNING: usize = 3;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const LEASE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// 孤儿执行（server 重启后从扩展同步采纳）的最大租期：超过客户端超时上限
+/// （600s）加余量仍等不到完成证明，就按丢失处理，释放额度与窗口锁。
+/// 扩展侧对执行条目有等长寿命上限，两侧语义一致。
+const ORPHAN_LEASE: Duration = Duration::from_secs(660);
 /// bridge 自建 tab 的容量上限；打满时新开 tab/窗口前逐出最旧的 5 个
 const MAX_TRACKED_TABS: usize = 20;
 const TAB_EVICT_COUNT: usize = 5;
@@ -47,6 +51,9 @@ struct Request {
     deadline: Instant,
     replied: bool,
     bootstrap: bool,
+    /// server 重启后从扩展同步采纳的孤儿执行：没有客户端等结果，到期
+    /// fail-open 释放，不再无限等待完成证明。
+    orphan: bool,
 }
 impl Request {
     fn task_key(&self) -> String {
@@ -182,16 +189,23 @@ impl Hub {
             } => {
                 let identity = client_id.unwrap_or_else(|| format!("conn-{conn_id}"));
                 if role == Role::Extension {
-                    // Do not let another profile's window IDs stand in for an
-                    // unresolved execution in the original browser instance.
+                    // 实例身份变更（扩展重载/更换 profile）时，原实例的在途执行
+                    // 已随其 service worker 消亡：按丢失完成并释放额度，放行新
+                    // 实例注册。旧行为是拒绝连接，但被采纳的孤儿执行有 660s
+                    // 租期，期间扩展会陷入无限重连循环，整个 bridge 被卡死。
                     if !self.executing.is_empty()
                         && self
                             .extension_instance
                             .as_ref()
                             .is_some_and(|id| id != &identity)
                     {
-                        let _ = tx.send(Message::Close(None));
-                        return;
+                        let ids: Vec<_> = self.executing.keys().cloned().collect();
+                        for id in ids {
+                            self.complete(
+                                &id,
+                                Err("extension instance changed; execution result unknown".into()),
+                            );
+                        }
                     }
                     if let Some(old) = self.extension.take() {
                         self.disconnect(old);
@@ -536,6 +550,7 @@ impl Hub {
             deadline: Instant::now() + timeout,
             replied: false,
             bootstrap: false,
+            orphan: false,
         };
         if matches!(method.as_str(), "list_tabs" | "list_windows") {
             let mut outgoing = request.msg.clone();
@@ -616,23 +631,42 @@ impl Hub {
             }
             return;
         }
+        if msg.method.as_deref() == Some("_execution_expired") {
+            // 扩展丢弃超龄执行条目时通知：按丢失完成处理，释放额度与窗口锁。
+            if let Some(id) = msg.params.as_ref().and_then(|p| p["id"].as_str()) {
+                self.complete(id, Err("execution expired without completion".into()));
+            }
+            return;
+        }
         if msg.method.as_deref() == Some("_window_removed") {
             if let Some(window) = msg.params.as_ref().and_then(|p| p["window_id"].as_i64()) {
+                // 完成解析到该窗口的在途执行：按请求解析出的 window_id 匹配，
+                // 跨窗口任务（如 close_auto_tabs）不再要求恰好只占这一个窗口。
                 let ids: Vec<_> = self
                     .executing
                     .iter()
-                    .filter(|(_, (key, _))| {
-                        self.tasks.get(key).is_some_and(|t| t.windows == [window])
+                    .filter(|(_, (_, r))| {
+                        r.msg.params.as_ref().and_then(|p| p["window_id"].as_i64()) == Some(window)
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
                 for id in ids {
                     self.complete(&id, Err("target window was closed".into()));
                 }
+                // 关闭涉及该窗口的任务：在途指令若指向别的窗口则继续等它完成
                 let keys: Vec<_> = self
                     .tasks
                     .iter()
-                    .filter(|(_, t)| t.windows.contains(&window) && t.inflight.is_none())
+                    .filter(|(_, t)| {
+                        t.windows.contains(&window)
+                            && t.inflight
+                                .as_ref()
+                                .and_then(|id| self.executing.get(id))
+                                .is_none_or(|(_, r)| {
+                                    r.msg.params.as_ref().and_then(|p| p["window_id"].as_i64())
+                                        != Some(window)
+                                })
+                    })
                     .map(|(k, _)| k.clone())
                     .collect();
                 for key in keys {
@@ -677,7 +711,9 @@ impl Hub {
                     && !self.completed_during_sync.contains(wire)
                 {
                     // Adopt orphaned executions after a server restart. Their
-                    // capacity stays reserved until a completion/closed proof.
+                    // capacity stays reserved until a completion/closed proof,
+                    // the extension reports them expired, or ORPHAN_LEASE runs
+                    // out (fail-open; see the tick() sweep).
                     let windows = window_ids(&entry["window_ids"]).unwrap_or_default();
                     let key = format!("orphan:{wire}");
                     self.tasks.insert(
@@ -704,9 +740,10 @@ impl Hub {
                                 original: wire.into(),
                                 wire: wire.into(),
                                 msg: WireMessage::default(),
-                                deadline: Instant::now() + DEFAULT_TIMEOUT,
+                                deadline: Instant::now() + ORPHAN_LEASE,
                                 replied: true,
                                 bootstrap: false,
+                                orphan: true,
                             },
                         ),
                     );
@@ -1017,6 +1054,21 @@ impl Hub {
                 self.executing.insert(id, (key, r));
             }
         }
+        // 孤儿执行的最大租期兜底：超过 ORPHAN_LEASE 仍等不到完成证明（扩展
+        // 也没上报 _execution_expired）的，按丢失 fail-open 释放，避免扩展
+        // 挂起时永久占用全局额度与窗口锁。迟到的真实响应因不在 executing
+        // 里会被 complete() 自然忽略。
+        let ids: Vec<_> = self
+            .executing
+            .iter()
+            .filter(|(_, (_, r))| r.orphan && r.deadline <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some((key, _)) = self.executing.remove(&id) {
+                self.remove_task(&key);
+            }
+        }
         let keys: Vec<_> = self.tasks.keys().cloned().collect();
         for key in keys {
             let mut expired = Vec::new();
@@ -1172,7 +1224,10 @@ impl Hub {
     /// 向扩展发射后不管地关闭一个标签页（延迟关闭与逐出共用）。
     /// 扩展对直发的 close_tab 豁免 `_window_ids` 准入检查；标签页已不存在时
     /// 扩展返回错误，响应 id 不匹配任何在途请求，complete() 会自然忽略。
+    /// tracked 记录在发射时同步回收：无论关闭成败，这条 tab 记录都不该继续
+    /// 占容量（已不存在则本就无效，重连对账会兜底纠偏）。
     fn send_close_tab(&mut self, tab_id: i64) {
+        self.tracked_tabs.remove(&tab_id);
         let Some(ext) = self.extension else {
             return;
         };
@@ -1188,8 +1243,10 @@ impl Hub {
         );
     }
 
-    /// 向扩展发射后不管地关闭一个窗口（窗口逐出用）。
+    /// 向扩展发射后不管地关闭一个窗口（窗口逐出用）。窗口记录与其标签页
+    /// 记录在发射时同步回收，理由同 send_close_tab。
     fn send_close_window(&mut self, window_id: i64) {
+        self.remove_tracked_window(window_id);
         let Some(ext) = self.extension else {
             return;
         };
@@ -1226,7 +1283,6 @@ impl Hub {
         oldest.sort_by_key(|(last_used, _)| *last_used);
         oldest.truncate(TAB_EVICT_COUNT);
         for (_, tab_id) in oldest {
-            self.tracked_tabs.remove(&tab_id);
             self.send_close_tab(tab_id);
         }
     }
@@ -1244,28 +1300,32 @@ impl Hub {
         oldest.sort_by_key(|(last_used, _)| *last_used);
         oldest.truncate(WINDOW_EVICT_COUNT);
         for (_, window_id) in oldest {
-            self.remove_tracked_window(window_id);
             self.send_close_window(window_id);
         }
     }
 
     /// 扩展连接时上报现存 bridge 资源清单：server 重启后据此重建队列，
     /// 避免把已存在的 agent 窗口误判为用户窗口而拒绝服务。
+    /// 全量对账：以上报为准替换本地图表，顺带清掉 server 侧已失效的
+    /// 窗口/标签页记录（离线期间被关闭、延迟关闭的 tab 等）。
     fn reconcile_inventory(&mut self, params: &Value) {
         let now = Instant::now();
-        if let Some(windows) = params["windows"].as_array() {
-            for window_id in windows.iter().filter_map(Value::as_i64) {
-                self.tracked_windows.insert(window_id, now);
+        let mut windows = HashMap::new();
+        if let Some(list) = params["windows"].as_array() {
+            for window_id in list.iter().filter_map(Value::as_i64) {
+                windows.insert(window_id, now);
             }
         }
-        if let Some(tabs) = params["tabs"].as_array() {
-            for tab in tabs {
+        let mut tabs = HashMap::new();
+        if let Some(list) = params["tabs"].as_array() {
+            for tab in list {
                 if let Some(tab_id) = tab["tab_id"].as_i64() {
-                    self.tracked_tabs
-                        .insert(tab_id, (tab["window_id"].as_i64(), now));
+                    tabs.insert(tab_id, (tab["window_id"].as_i64(), now));
                 }
             }
         }
+        self.tracked_windows = windows;
+        self.tracked_tabs = tabs;
     }
 
     /// 创建入口（new_tab / new_window / click --new-tab / 默认窗口引导）在放行前

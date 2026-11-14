@@ -48,8 +48,13 @@ let extensionInstanceId = '';
 type ExecutionRecord = {
   state: 'running' | 'unknown';
   window_ids: number[];
+  started_at: number;
 };
 const executions = new Map<string, ExecutionRecord>();
+/** 执行条目最大寿命。server 侧客户端超时上限 600s，再加余量：超过后条目只可能
+ *  是挂起或丢失（SW 的 await 链随 worker 死亡，不存在"还在执行"的超龄条目），
+ *  继续保留只会永久占用窗口锁与全局并发额度。 */
+const EXECUTION_MAX_AGE_MS = 660_000;
 let journalWrites: Promise<void> = Promise.resolve();
 
 type WindowTaskSnapshot = {
@@ -139,7 +144,7 @@ async function restoreState(): Promise<void> {
     ? saved.bridgeInstanceId : crypto.randomUUID();
   for (const [id, record] of (saved.bridgeExecutions ?? []) as Array<[string, { state: string; window_ids: number[] }]>) {
     if (record.state === 'running' || record.state === 'unknown') {
-      executions.set(id, { state: 'unknown', window_ids: record.window_ids });
+      executions.set(id, { state: 'unknown', window_ids: record.window_ids, started_at: Date.now() });
     }
   }
   // Replace the old result cache before any other write, even if it already
@@ -356,6 +361,8 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
 
   try {
     await stateReady;
+    // 先丢弃超龄执行条目（含通知 server），避免挂起/丢失的记录卡死窗口准入
+    expireStaleExecutions();
     const clientId = typeof msg.client_id === 'string' ? msg.client_id : '';
     if (msg.method === '_resolve_target') {
       const p = msg.params ?? {};
@@ -398,7 +405,7 @@ async function handleMessage(socket: WebSocket, raw: string): Promise<void> {
     }
     // Persist before starting browser code. After a service-worker restart a
     // running entry becomes unknown, never assumed to have stopped.
-    const record: ExecutionRecord = { state: 'running', window_ids: windows as number[] };
+    const record: ExecutionRecord = { state: 'running', window_ids: windows as number[], started_at: Date.now() };
     executions.set(msg.id, record);
     try {
       await saveExecutionJournal();
@@ -505,7 +512,26 @@ async function validateExecutionScope(method: string, params: Record<string, unk
   }
 }
 
+/** 丢弃超过最大寿命的执行条目，并通知 server 释放对应额度与窗口锁。
+ *  超龄条目只可能是挂起或丢失；server 侧对采纳的孤儿执行另有等长租期兜底。 */
+function expireStaleExecutions(): string[] {
+  const now = Date.now();
+  const expired = Array.from(executions.entries())
+    .filter(([, record]) => now - record.started_at > EXECUTION_MAX_AGE_MS)
+    .map(([id]) => id);
+  if (expired.length === 0) return [];
+  for (const id of expired) executions.delete(id);
+  void saveExecutionJournal().catch(() => {});
+  for (const id of expired) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      send(ws, { method: '_execution_expired', params: { id } });
+    }
+  }
+  return expired;
+}
+
 async function syncExecutions(ids: string[]): Promise<unknown> {
+  expireStaleExecutions();
   const present = new Set((await chrome.windows.getAll()).map((win) => win.id));
   const result: Array<Record<string, unknown>> = [];
   for (const id of new Set([...ids, ...executions.keys()])) {
@@ -513,10 +539,17 @@ async function syncExecutions(ids: string[]): Promise<unknown> {
     if (entry && entry.window_ids.length > 0 && entry.window_ids.every((wid) => !present.has(wid))) {
       executions.delete(id);
       result.push({ id, state: 'closed' });
-    } else {
+    } else if (!entry) {
       // A missing ID has no unfinished execution. The caller may submit a new
       // request; there is no completed result to recover or replay.
-      result.push({ id, ...(entry ?? { state: 'finished' }) });
+      result.push({ id, state: 'finished' });
+    } else if (entry.state === 'unknown') {
+      // SW 重启恢复的条目：await 链已随旧 worker 死亡，不可能再产出结果。
+      // 按 finished 上报并删除，让 server 释放额度，而不是把额度永久占住。
+      executions.delete(id);
+      result.push({ id, state: 'finished' });
+    } else {
+      result.push({ id, state: entry.state, window_ids: entry.window_ids });
     }
   }
   await saveExecutionJournal();

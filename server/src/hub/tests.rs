@@ -120,6 +120,21 @@ impl Fixture {
             .deadline = Instant::now() - Duration::from_millis(1);
         self.hub.tick();
     }
+    /// 注销旧扩展并以新连接注册，返回扩展收到的第一条消息（sync 请求）。
+    /// 后续发给扩展的消息走 f.browser 新 channel。
+    fn reconnect_extension(&mut self, conn_id: u64) -> WireMessage {
+        self.hub.event(HubMsg::Unregister { conn_id: 1 });
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.hub.event(HubMsg::Register {
+            conn_id,
+            role: Role::Extension,
+            name: "reconnect".into(),
+            client_id: Some("instance".into()),
+            tx,
+        });
+        self.browser = rx;
+        recv(&mut self.browser)
+    }
 }
 
 #[test]
@@ -761,4 +776,157 @@ fn window_removed_notification_cascades_tab_records() {
     assert!(!f.hub.tracked_tabs.contains_key(&60));
     assert!(!f.hub.tracked_tabs.contains_key(&61));
     assert!(f.hub.tracked_tabs.contains_key(&80));
+}
+
+#[test]
+fn execution_expired_notification_releases_window_and_capacity() {
+    let mut f = Fixture::new();
+    f.submit(2, "first", 7, None);
+    let command = recv(&mut f.browser);
+    let wire = command.id.clone().unwrap();
+    f.hub.event(HubMsg::Forward {
+        conn_id: 1,
+        msg: WireMessage {
+            id: None,
+            method: Some("_execution_expired".into()),
+            params: Some(json!({"id": wire})),
+            ..WireMessage::default()
+        },
+    });
+    // 扩展宣告丢失：在途执行按失败完成，额度与窗口锁立即释放
+    let failure = recv(&mut f.a);
+    assert_eq!(failure.success, Some(false));
+    assert!(f.hub.executing.is_empty());
+    assert!(f.hub.tasks.is_empty());
+    f.submit(2, "second", 7, None);
+    assert_eq!(recv(&mut f.browser).method.as_deref(), Some("run_script"));
+}
+
+#[test]
+fn sync_finished_report_releases_drained_capacity() {
+    let mut f = Fixture::new();
+    f.submit(2, "first", 7, None);
+    let command = recv(&mut f.browser);
+    let wire = command.id.clone().unwrap();
+    // 客户端超时进入 draining：额度仍被保留，直到拿到完成证明
+    f.expire_execution(&command);
+    assert_eq!(recv(&mut f.a).success, Some(false));
+    assert_eq!(f.hub.executing.len(), 1);
+    // 扩展重连后上报 finished（SW 重启恢复的 unknown 条目按此上报）：
+    // 释放额度，窗口可立即复用
+    let sync = f.reconnect_extension(4);
+    f.hub.event(HubMsg::Forward {
+        conn_id: 4,
+        msg: WireMessage::ok(
+            sync.id.as_deref().unwrap(),
+            json!({"executions":[{"id":wire,"state":"finished"}]}),
+        ),
+    });
+    assert!(f.hub.executing.is_empty());
+    assert!(f.hub.tasks.is_empty());
+    f.submit(2, "second", 7, None);
+    assert_eq!(recv(&mut f.browser).method.as_deref(), Some("run_script"));
+}
+
+#[test]
+fn orphan_lease_expiry_fails_open_after_deadline() {
+    let mut f = Fixture::new();
+    let sync = f.reconnect_extension(4);
+    f.hub.event(HubMsg::Forward {
+        conn_id: 4,
+        msg: WireMessage::ok(
+            sync.id.as_deref().unwrap(),
+            json!({"executions":[{"id":"orphan-a","state":"running","window_ids":[7]}]}),
+        ),
+    });
+    assert_eq!(f.hub.executing.len(), 1);
+    // 租期未到：占用保持
+    f.hub.tick();
+    assert_eq!(f.hub.executing.len(), 1);
+    // 租期到期且始终没有完成证明：fail-open 释放，窗口可复用
+    f.hub.executing.get_mut("orphan-a").unwrap().1.deadline =
+        Instant::now() - Duration::from_millis(1);
+    f.hub.tick();
+    assert!(f.hub.executing.is_empty());
+    assert!(f.hub.tasks.is_empty());
+    f.submit(2, "retry", 7, None);
+    assert_eq!(recv(&mut f.browser).method.as_deref(), Some("run_script"));
+}
+
+#[test]
+fn fire_and_forget_closes_reclaim_tracked_records_immediately() {
+    let mut f = Fixture::new();
+    f.track(7);
+    assert!(f.hub.tracked_tabs.contains_key(&70));
+    f.hub.send_close_tab(70);
+    assert!(!f.hub.tracked_tabs.contains_key(&70));
+    assert!(f.hub.tracked_windows.contains_key(&7));
+    f.hub.send_close_window(7);
+    assert!(!f.hub.tracked_windows.contains_key(&7));
+    assert!(f.hub.tracked_tabs.is_empty());
+}
+
+#[test]
+fn inventory_reconcile_replaces_stale_records_instead_of_accumulating() {
+    let mut f = Fixture::new();
+    f.track(7);
+    assert!(f.hub.tracked_tabs.contains_key(&70));
+    f.hub.event(HubMsg::Forward {
+        conn_id: 1,
+        msg: WireMessage {
+            id: None,
+            method: Some("_bridge_inventory".into()),
+            params: Some(json!({
+                "windows": [8],
+                "tabs": [{"tab_id": 80, "window_id": 8}],
+            })),
+            ..WireMessage::default()
+        },
+    });
+    // 全量对账：已失效的窗口/标签页记录被清掉，而不是永久堆积
+    assert!(f.hub.tracked_windows.contains_key(&8));
+    assert!(!f.hub.tracked_windows.contains_key(&7));
+    assert!(f.hub.tracked_tabs.contains_key(&80));
+    assert!(!f.hub.tracked_tabs.contains_key(&70));
+}
+
+#[test]
+fn extension_instance_change_completes_stale_executions_instead_of_rejecting() {
+    let mut f = Fixture::new();
+    f.submit(2, "first", 7, None);
+    let command = recv(&mut f.browser);
+    let wire = command.id.clone().unwrap();
+    // 扩展重连后该执行被采纳为孤儿（无完成证明，占窗口与全局额度）
+    let sync = f.reconnect_extension(4);
+    f.respond(
+        &sync,
+        json!({"executions":[{"id":wire,"state":"running","window_ids":[7]}]}),
+    );
+    assert_eq!(f.hub.executing.len(), 1);
+    // 换实例注册（扩展重载）：旧实例的孤儿按丢失完成，新实例被放行，
+    // 而不是被拒绝后陷入无限重连循环
+    let (tx, rx) = mpsc::unbounded_channel();
+    f.hub.event(HubMsg::Register {
+        conn_id: 5,
+        role: Role::Extension,
+        name: "reloaded".into(),
+        client_id: Some("new-instance".into()),
+        tx,
+    });
+    f.browser = rx;
+    let sync2 = recv(&mut f.browser);
+    assert_eq!(sync2.method.as_deref(), Some("_sync_executions"));
+    f.respond(&sync2, json!({"executions":[]}));
+    assert!(f.hub.executing.is_empty());
+    assert!(f.hub.tasks.is_empty());
+    // 等待结果的客户端收到明确错误，而不是一直挂到超时
+    let failure = recv(&mut f.a);
+    assert_eq!(failure.success, Some(false));
+    // 新实例接续调度
+    f.request(2, "second", "run_script", json!({"window_id": 7}));
+    let resolve = recv(&mut f.browser);
+    assert_eq!(resolve.method.as_deref(), Some("_resolve_target"));
+    f.track(7);
+    f.respond(&resolve, json!({"window_ids":[7],"params":{"tab_id":70,"window_id":7}}));
+    assert_eq!(recv(&mut f.browser).method.as_deref(), Some("run_script"));
 }
