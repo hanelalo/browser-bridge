@@ -147,6 +147,10 @@ fn trends_script(date_spec: &str) -> String {
 /// 等新标签页真正落到 trends.google.com 且应用壳起来。
 /// new_tab 在导航提交前就返回，直接跑采集脚本可能注入到空白文档。
 async fn wait_page_ready(bridge: &mut Bridge, tab_id: &Value) -> Result<(), String> {
+    // 区分"页面真没就绪"和"探测脚本本身执行失败"（如扩展的 userScripts
+    // 开关被重置导致注入失败）：后者继续报"未就绪"会误导排查方向。
+    let mut injected = false;
+    let mut last_error = String::new();
     for _ in 0..READY_POLLS {
         let probe = bridge
             .request(
@@ -158,14 +162,19 @@ async fn wait_page_ready(bridge: &mut Bridge, tab_id: &Value) -> Result<(), Stri
                 }),
             )
             .await;
-        if probe
-            .ok()
-            .and_then(|v| v.get("result").and_then(Value::as_bool))
-            == Some(true)
-        {
-            return Ok(());
+        match probe {
+            Ok(value) => {
+                injected = true;
+                if value.get("result").and_then(Value::as_bool) == Some(true) {
+                    return Ok(());
+                }
+            }
+            Err(error) => last_error = error,
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    if !injected {
+        return Err(format!("就绪探测脚本无法在页面执行：{last_error}"));
     }
     Err("Google Trends 页面未就绪（可能被限制或需要验证）".into())
 }

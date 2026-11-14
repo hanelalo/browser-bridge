@@ -104,19 +104,28 @@ fn explore_url(query: &str, date: &str, geo: &str) -> String {
 /// new_tab returns before navigation commits. Poll with separate short scripts so
 /// the long-running collector never gets attached to the initial blank document.
 async fn wait_explore_ready(bridge: &mut Bridge, tab_id: &Value) -> Result<(), String> {
+    // 区分"页面真没就绪"和"探测脚本本身执行失败"（如扩展的 userScripts
+    // 开关被重置导致注入失败）：后者继续报"未就绪"会误导排查方向。
+    let mut injected = false;
+    let mut last_error = String::new();
     for _ in 0..60 {
         let probe = bridge.request("ogt-ready", "run_script", json!({
             "tab_id": tab_id,
             "code": "location.hostname === 'trends.google.com' && document.readyState === 'complete' && !!document.querySelector('[ng-app=trendsApp]')"
         })).await;
-        if probe
-            .ok()
-            .and_then(|v| v.get("result").and_then(Value::as_bool))
-            == Some(true)
-        {
-            return Ok(());
+        match probe {
+            Ok(value) => {
+                injected = true;
+                if value.get("result").and_then(Value::as_bool) == Some(true) {
+                    return Ok(());
+                }
+            }
+            Err(error) => last_error = error,
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    if !injected {
+        return Err(format!("就绪探测脚本无法在页面执行：{last_error}"));
     }
     Err("经典版页面未就绪（可能被限制或需要验证）".into())
 }
